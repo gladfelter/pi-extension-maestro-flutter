@@ -1,0 +1,9 @@
+appId: com.pi.extension.test_app
+---
+- tapOn: "nav-to-form"
+- tapOn: "name-field"
+- inputText: "Alice"
+- tapOn: "email-field"
+- inputText: "alice@example.com"
+- tapOn: "submit-button"
+- assertVisible: "Submitted: Alice <alice@example.com>"

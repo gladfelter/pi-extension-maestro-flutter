@@ -1,9 +1,57 @@
+/**
+ * pi-extension-maestro-flutter
+ *
+ * Flutter build/run/hot-reload/inspect tools, Maestro UI testing tools,
+ * and device management for the pi coding agent.
+ *
+ * TODO: Break up index.ts into focused modules:
+ *   - device-manager.ts   (discover, connect, disconnect, state)
+ *   - project-finder.ts   (findFlutterProjects, resolveProject, config)
+ *   - flutter-tools.ts    (build, run, hot_reload, stop, log)
+ *   - vm-service.ts       (vm_call, inspect_focus, inspect_tree)
+ *   - maestro-tools.ts    (hierarchy, test, action)
+ *   - commands.ts         (slash command registrations)
+ *
+ * TODO: Unit tests for internal state transitions:
+ *   - Project auto-selection: 0, 1, 2+ projects
+ *   - Device connect/disconnect lifecycle
+ *   - Emulator launch vs already-running tracking
+ *   - Config file load/save/clear round-trips
+ *   - resolveProject error messages for each scenario
+ *
+ * TODO: Exploratory testing by installing the extension and using it
+ *   with test_app/ to drive the full Flutter + Maestro workflows.
+ *
+ * TODO: After exploratory + unit testing fixes, mock out stateful deps
+ *   (flutter CLI, adb, emulator, maestro) to create regression tests
+ *   for the interactions with those complex external dependencies.
+ */
+
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { spawn, ChildProcess } from "node:child_process";
-import { writeFileSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { writeFileSync, unlinkSync, readdirSync, existsSync, readFileSync, mkdirSync } from "node:fs";
+import { join, dirname, relative } from "node:path";
+import { tmpdir, homedir } from "node:os";
+
+interface DeviceInfo {
+  id: string;
+  type: "usb" | "emulator" | "network" | "avd";
+  model?: string;
+  status: "connected" | "available" | "offline" | "unauthorized";
+}
+
+interface SavedDevice {
+  id: string;
+  type: "ip" | "emulator";
+  name?: string;
+}
+
+interface FlutterProject {
+  name: string;
+  path: string;
+  relPath: string;
+}
 
 export default function (pi: ExtensionAPI) {
   let flutterProcess: ChildProcess | null = null;
@@ -11,11 +59,180 @@ export default function (pi: ExtensionAPI) {
   let appId: string | null = null;
   let deviceId: string | null = null;
   let vmServiceUrl: string | null = null;
+  let savedDevice: SavedDevice | null = null;
+  let launchedEmulator: string | null = null;
 
+  // ── Device config file (.pi/device.json) ───────────────────────────
+  function deviceConfigPath(cwd: string): string {
+    return join(cwd, ".pi", "device.json");
+  }
+
+  function loadDeviceConfig(cwd: string): SavedDevice | null {
+    try {
+      const path = deviceConfigPath(cwd);
+      if (!existsSync(path)) return null;
+      return JSON.parse(readFileSync(path, "utf-8")) as SavedDevice;
+    } catch {
+      return null;
+    }
+  }
+
+  function saveDeviceConfig(cwd: string, device: SavedDevice | null) {
+    const path = deviceConfigPath(cwd);
+    if (device === null) {
+      try {
+        unlinkSync(path);
+      } catch {
+        /* didn't exist */
+      }
+      return;
+    }
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify(device, null, 2) + "\n", "utf-8");
+  }
+
+  // ── Flutter project validation ──────────────────────────────────────
+
+  // ── Flutter project discovery ───────────────────────────────────────
+
+  const SKIP_DIRS = new Set([
+    ".git",
+    "node_modules",
+    "build",
+    ".dart_tool",
+    ".pi",
+    "android",
+    "ios",
+    "linux",
+    "macos",
+    "windows",
+    "web",
+  ]);
+
+  function findFlutterProjects(root: string, maxDepth = 4): FlutterProject[] {
+    const results: FlutterProject[] = [];
+
+    function scan(dir: string, depth: number) {
+      if (depth > maxDepth) return;
+      let entries: ReturnType<typeof readdirSync>;
+      try {
+        entries = readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (entry.name.startsWith(".") || SKIP_DIRS.has(entry.name)) continue;
+        if (!entry.isDirectory()) continue;
+        const fullPath = join(dir, entry.name);
+        if (existsSync(join(fullPath, "pubspec.yaml"))) {
+          try {
+            const content = readFileSync(join(fullPath, "pubspec.yaml"), "utf-8");
+            const nameMatch = content.match(/^name:\s*(.+)$/m);
+            results.push({
+              name: nameMatch?.[1]?.trim() || entry.name,
+              path: fullPath,
+              relPath: relative(root, fullPath),
+            });
+          } catch {
+            /* skip unreadable */
+          }
+        } else {
+          scan(fullPath, depth + 1);
+        }
+      }
+    }
+
+    scan(root, 0);
+    return results;
+  }
+
+  let selectedProject: FlutterProject | null = null;
+
+  function projectConfigPath(cwd: string): string {
+    return join(cwd, ".pi", "flutter-project.json");
+  }
+
+  function loadProjectConfig(cwd: string): FlutterProject | null {
+    try {
+      const path = projectConfigPath(cwd);
+      if (!existsSync(path)) return null;
+      return JSON.parse(readFileSync(path, "utf-8")) as FlutterProject;
+    } catch {
+      return null;
+    }
+  }
+
+  function saveProjectConfig(cwd: string, project: FlutterProject | null) {
+    const path = projectConfigPath(cwd);
+    if (project === null) {
+      try {
+        unlinkSync(path);
+      } catch {
+        /* didn't exist */
+      }
+      return;
+    }
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify(project, null, 2) + "\n", "utf-8");
+  }
+
+  function resolveProject(cwd: string): FlutterProject {
+    if (selectedProject && existsSync(join(selectedProject.path, "pubspec.yaml"))) {
+      return selectedProject;
+    }
+
+    const all = findFlutterProjects(cwd);
+
+    if (all.length === 0) {
+      throw new Error(
+        `No Flutter projects found under ${cwd}.\n` +
+          `Create one with: flutter create my_app\n` +
+          `Or use the bundled test app: cd test_app`,
+      );
+    }
+
+    if (all.length === 1) {
+      selectedProject = all[0];
+      saveProjectConfig(cwd, selectedProject);
+      return selectedProject;
+    }
+
+    throw new Error(
+      `Multiple Flutter projects found. Select one with /flutter-project:\n` +
+        all.map((p) => `  ${p.relPath}  (${p.name})`).join("\n") +
+        `\n\nExample: /flutter-project ${all[0].name}`,
+    );
+  }
+
+  // ── Restore saved device and project on session start ──────────────
+  pi.on("session_start", async (_event, ctx) => {
+    // Restore device
+    const device = loadDeviceConfig(ctx.cwd);
+    if (device) {
+      savedDevice = device;
+      if (device.type === "ip") {
+        await pi.exec("adb", ["connect", device.id]);
+      }
+    }
+    // Restore project
+    const project = loadProjectConfig(ctx.cwd);
+    if (project && existsSync(join(project.path, "pubspec.yaml"))) {
+      selectedProject = project;
+    }
+  });
+
+  // ── Cleanup on shutdown ─────────────────────────────────────────────
   pi.on("session_shutdown", async () => {
     if (flutterProcess) {
       flutterProcess.kill();
       flutterProcess = null;
+    }
+    if (launchedEmulator) {
+      await pi.exec("adb", ["-s", launchedEmulator, "emu", "kill"]);
+      launchedEmulator = null;
+    }
+    if (savedDevice?.type === "ip") {
+      await pi.exec("adb", ["disconnect", savedDevice.id]);
     }
   });
 
@@ -35,6 +252,409 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  // ── Slash commands (user-facing) ────────────────────────────────────
+
+  pi.registerCommand("flutter-project", {
+    description: "List or select the Flutter project to work with",
+    handler: async (args, ctx) => {
+      const projects = findFlutterProjects(ctx.cwd);
+
+      if (args.trim()) {
+        // Select a specific project by name or relPath
+        const match = projects.find((p) => p.name === args.trim() || p.relPath === args.trim());
+        if (!match) {
+          const list = projects.map((p) => `  ${p.relPath}  (${p.name})`).join("\n");
+          ctx.ui.notify(`No project matching "${args.trim()}". Available:\n${list}`, "error");
+          return;
+        }
+        selectedProject = match;
+        saveProjectConfig(ctx.cwd, match);
+        ctx.ui.notify(`Selected Flutter project: ${match.name} (${match.relPath})`, "info");
+        return;
+      }
+
+      // List all projects
+      if (projects.length === 0) {
+        ctx.ui.notify("No Flutter projects found in workspace.", "warning");
+        return;
+      }
+
+      const current = selectedProject;
+      const list = projects
+        .map((p) => {
+          const marker = current?.path === p.path ? " ▶ selected" : "";
+          return `  ${p.relPath}  (${p.name})${marker}`;
+        })
+        .join("\n");
+      ctx.ui.notify(`Flutter projects:\n${list}`, "info");
+    },
+  });
+
+  pi.registerCommand("flutter-devices", {
+    description: "List available ADB devices and emulators",
+    handler: async (_args, ctx) => {
+      const devices = await discoverDevices();
+      if (devices.length === 0) {
+        ctx.ui.notify("No devices found.", "warning");
+        return;
+      }
+      const lines = devices.map((d) => {
+        const icon = d.status === "connected" ? "🟢" : d.status === "offline" ? "🔴" : "⚪";
+        const saved = savedDevice?.id === d.id ? " 💾" : "";
+        return `${icon} ${d.id}  ${d.model || ""}  (${d.type}, ${d.status})${saved}`;
+      });
+      ctx.ui.notify(lines.join("\n"), "info");
+    },
+  });
+
+  pi.registerCommand("flutter-connect", {
+    description: "Connect to a device by id (IP:port or AVD name)",
+    handler: async (args, ctx) => {
+      if (!args.trim()) {
+        ctx.ui.notify("Usage: /flutter-connect <id>  (from /flutter-devices list)", "error");
+        return;
+      }
+
+      const targetId = args.trim();
+
+      if (targetId.startsWith("emulator-avd:") || !targetId.includes(":")) {
+        // Treat as AVD name
+        const avdName = targetId.startsWith("emulator-avd:") ? targetId.replace("emulator-avd:", "") : targetId;
+        // Shell out to flutter emulators --launch (non-blocking notify first)
+        ctx.ui.notify(`Launching emulator ${avdName}...`, "info");
+        const result = await pi.exec("flutter", ["emulators", "--launch", avdName]);
+        if (result.exitCode !== 0) {
+          ctx.ui.notify(`Failed to launch: ${result.output}`, "error");
+          return;
+        }
+        // Wait for boot and find serial (up to 120s)
+        for (let i = 0; i < 60; i++) {
+          await new Promise((r) => setTimeout(r, 2000));
+          const check = await pi.exec("adb", ["devices"]);
+          for (const line of check.output.split("\n")) {
+            if (line.startsWith("emulator-") && line.includes("device")) {
+              const serial = line.split(/\s+/)[0];
+              const booted = await pi.exec("adb", ["-s", serial, "shell", "getprop", "sys.boot_completed"]);
+              if (booted.output.trim() === "1") {
+                savedDevice = { id: serial, type: "emulator", name: avdName };
+                launchedEmulator = serial;
+                saveDeviceConfig(ctx.cwd, savedDevice);
+                ctx.ui.notify(`✅ Emulator booted: ${serial}`, "info");
+                return;
+              }
+            }
+          }
+        }
+        ctx.ui.notify("Emulator did not boot within 2 minutes.", "error");
+        return;
+      }
+
+      // IP:port
+      const result = await pi.exec("adb", ["connect", targetId]);
+      if (result.exitCode !== 0 || result.output.includes("failed")) {
+        ctx.ui.notify(`Connection failed: ${result.output}`, "error");
+        return;
+      }
+      savedDevice = { id: targetId, type: "ip" };
+      saveDeviceConfig(ctx.cwd, savedDevice);
+      ctx.ui.notify(`✅ Connected: ${targetId}`, "info");
+    },
+  });
+
+  pi.registerCommand("flutter-disconnect", {
+    description: "Disconnect from the current device",
+    handler: async (_args, ctx) => {
+      if (!savedDevice) {
+        ctx.ui.notify("No device to disconnect.", "warning");
+        return;
+      }
+
+      if (launchedEmulator) {
+        await pi.exec("adb", ["-s", launchedEmulator, "emu", "kill"]);
+        ctx.ui.notify(`Killed emulator ${launchedEmulator}`, "info");
+        launchedEmulator = null;
+      } else if (savedDevice.type === "ip") {
+        await pi.exec("adb", ["disconnect", savedDevice.id]);
+        ctx.ui.notify(`Disconnected ${savedDevice.id}`, "info");
+      }
+
+      savedDevice = null;
+      saveDeviceConfig(ctx.cwd, null);
+    },
+  });
+
+  // ── Device Discovery & Connection ───────────────────────────────────
+
+  /** Collect all discoverable Flutter/ADB devices into DeviceInfo list. */
+  async function discoverDevices(): Promise<DeviceInfo[]> {
+    const devices: DeviceInfo[] = [];
+    const seen = new Set<string>();
+
+    // 1. Connected ADB devices
+    const adbResult = await pi.exec("adb", ["devices", "-l"]);
+    for (const line of adbResult.output.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("List of")) continue;
+      const parts = trimmed.split(/\s+/);
+      const serial = parts[0];
+      if (!serial) continue;
+      seen.add(serial);
+
+      const rest = parts.slice(1).join(" ");
+      const status = rest.startsWith("offline")
+        ? "offline"
+        : rest.startsWith("unauthorized")
+          ? "unauthorized"
+          : "connected";
+      const modelMatch = rest.match(/model:(\S+)/);
+      const type = serial.startsWith("emulator-") ? "emulator" : serial.includes(":") ? "network" : "usb";
+
+      devices.push({ id: serial, type, model: modelMatch?.[1], status });
+    }
+
+    // 2. Available AVDs (on-disk emulators)
+    try {
+      const emuResult = await pi.exec("flutter", ["emulators"]);
+      for (const line of emuResult.output.split("\n")) {
+        const nameMatch = line.match(/^([^•]+)\s+•\s+(.+)$/);
+        if (!nameMatch) continue;
+        const name = nameMatch[1].trim();
+        const id = `emulator-avd:${name}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        devices.push({ id, type: "avd", model: nameMatch[2].trim(), status: "available" });
+      }
+    } catch {
+      // flutter emulators may fail if no AVDs exist
+    }
+
+    // 3. AVDs from filesystem (catch any flutter emulators misses)
+    const avdHome = join(homedir(), ".android", "avd");
+    if (existsSync(avdHome)) {
+      try {
+        for (const entry of readdirSync(avdHome)) {
+          if (!entry.endsWith(".avd")) continue;
+          const name = entry.replace(/\.avd$/, "");
+          const id = `emulator-avd:${name}`;
+          if (seen.has(id)) continue;
+          seen.add(id);
+
+          // Try to read the config for more info
+          let model = "";
+          try {
+            const configPath = join(avdHome, `${name}.ini`);
+            const config = readFileSync(configPath, "utf-8");
+            const targetMatch = config.match(/target=(.+)/);
+            if (targetMatch) model = targetMatch[1];
+          } catch {
+            // ignore parse errors
+          }
+          devices.push({ id, type: "avd", model, status: "available" });
+        }
+      } catch {
+        // can't read AVD directory
+      }
+    }
+
+    // 4. mDNS-advertised ADB devices (Android 11+ wireless debugging)
+    try {
+      const mdnsResult = await pi.exec("adb", ["mdns", "services"]);
+      for (const line of mdnsResult.output.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith("List of")) continue;
+        const parts = trimmed.split(/\s+/);
+        const addr = parts[0];
+        if (!addr || seen.has(addr)) continue;
+        seen.add(addr);
+        devices.push({ id: addr, type: "network", status: "available" });
+      }
+    } catch {
+      // adb mdns check may not be supported or no devices
+    }
+
+    return devices;
+  }
+
+  pi.registerTool({
+    name: "flutter_devices",
+    label: "Flutter Devices",
+    description:
+      "List all available Flutter/ADB devices: connected devices, on-disk emulators (AVDs), and network devices found via mDNS.",
+    parameters: Type.Object({}),
+    async execute() {
+      const devices = await discoverDevices();
+
+      if (devices.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                "No devices found.\n\n" +
+                "• Connect a phone via USB with debugging enabled\n" +
+                "• Start an emulator: flutter emulators --launch <name>\n" +
+                "• Connect to a network device: adb connect <ip>:5555",
+            },
+          ],
+          details: { count: 0, saved: savedDevice },
+        };
+      }
+
+      const lines: string[] = [];
+      lines.push(`Found ${devices.length} device(s):\n`);
+
+      const emoji: Record<string, string> = {
+        connected: "🟢",
+        available: "⚪",
+        offline: "🔴",
+        unauthorized: "🟡",
+      };
+
+      for (const d of devices) {
+        const saved = savedDevice?.id === d.id ? " 💾 saved" : "";
+        const label = `${emoji[d.status] || "❓"} \`${d.id}\`${d.model ? ` — ${d.model}` : ""} (${d.type}, ${d.status})${saved}`;
+        lines.push(label);
+      }
+
+      if (savedDevice) {
+        lines.push(`\n💾 Saved preference: \`${savedDevice.id}\` (${savedDevice.type})`);
+      }
+
+      lines.push(`\nUse \`flutter_connect\` to connect to one of these devices.`);
+
+      return {
+        content: [{ type: "text", text: lines.join("\n") }],
+        details: { count: devices.length, saved: savedDevice, devices },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "flutter_connect",
+    label: "Flutter Connect",
+    description:
+      "Connect to a Flutter/ADB device by id (from flutter_devices). For IP:port it runs adb connect. For an emulator AVD it launches it. Saves this device as the default for future sessions.",
+    parameters: Type.Object({
+      id: Type.String({
+        description:
+          "Device id from flutter_devices (e.g., emulator-5554, 192.168.1.100:5555, or emulator-avd:test_34)",
+      }),
+    }),
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      const targetId = params.id;
+      const cwd = ctx.cwd;
+
+      // AVD emulator — launch it
+      if (targetId.startsWith("emulator-avd:")) {
+        const avdName = targetId.replace("emulator-avd:", "");
+
+        // Check if already running
+        const adbResult = await pi.exec("adb", ["devices"]);
+        const alreadyRunning = adbResult.output.includes(`emulator-`);
+        if (alreadyRunning) {
+          // Find the emulator serial
+          for (const line of adbResult.output.split("\n")) {
+            if (line.startsWith("emulator-") && line.includes("device")) {
+              const serial = line.split(/\s+/)[0];
+              savedDevice = { id: serial, type: "emulator", name: avdName };
+              saveDeviceConfig(cwd, savedDevice);
+              return {
+                content: [{ type: "text", text: `Emulator already running: \`${serial}\`\nSaved as default device.` }],
+                details: { device: serial, avd: avdName },
+              };
+            }
+          }
+        }
+
+        // Launch via flutter emulators --launch (handles KVM, snapshots, etc.)
+        const launchResult = await pi.exec("flutter", ["emulators", "--launch", avdName]);
+        if (launchResult.exitCode !== 0) {
+          throw new Error(`Failed to launch emulator ${avdName}:\n${launchResult.output}`);
+        }
+
+        // Wait for emulator to appear in adb and finish booting
+        for (let i = 0; i < 60; i++) {
+          if (signal?.aborted) throw new Error("Aborted while waiting for emulator.");
+          await new Promise((r) => setTimeout(r, 2000));
+          const check = await pi.exec("adb", ["devices"]);
+          for (const line of check.output.split("\n")) {
+            if (line.startsWith("emulator-") && line.includes("device")) {
+              const serial = line.split(/\s+/)[0];
+              const booted = await pi.exec("adb", ["-s", serial, "shell", "getprop", "sys.boot_completed"]);
+              if (booted.output.trim() === "1") {
+                savedDevice = { id: serial, type: "emulator", name: avdName };
+                launchedEmulator = serial;
+                saveDeviceConfig(cwd, savedDevice);
+                return {
+                  content: [
+                    {
+                      type: "text",
+                      text: `✅ Emulator launched and booted: \`${serial}\`\nSaved as default device.`,
+                    },
+                  ],
+                  details: { device: serial, avd: avdName },
+                };
+              }
+            }
+          }
+        }
+        throw new Error(`Emulator ${avdName} did not boot within 2 minutes.`);
+      }
+
+      // IP:port — adb connect
+      const result = await pi.exec("adb", ["connect", targetId]);
+      if (result.exitCode !== 0 || result.output.includes("failed")) {
+        throw new Error(`ADB connection failed:\n${result.output}`);
+      }
+      savedDevice = { id: targetId, type: "ip" };
+      saveDeviceConfig(cwd, savedDevice);
+      return {
+        content: [{ type: "text", text: `✅ Connected: \`${targetId}\`\nSaved as default device.` }],
+        details: { device: targetId },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "flutter_disconnect",
+    label: "Flutter Disconnect",
+    description:
+      "Disconnect from the current ADB device. If an emulator was launched, it is killed. If it was a network connection, adb disconnect is called. The saved device preference is cleared.",
+    parameters: Type.Object({}),
+    async execute(_, __, ___, ____, ctx) {
+      if (!savedDevice) {
+        return { content: [{ type: "text", text: "No saved device to disconnect from." }], details: {} };
+      }
+
+      const device = savedDevice;
+      const lines: string[] = [];
+
+      // Kill launched emulator
+      if (launchedEmulator) {
+        await pi.exec("adb", ["-s", launchedEmulator, "emu", "kill"]);
+        lines.push(`✅ Killed emulator \`${launchedEmulator}\``);
+        launchedEmulator = null;
+      }
+
+      // Disconnect network ADB
+      if (device.type === "ip") {
+        await pi.exec("adb", ["disconnect", device.id]);
+        lines.push(`✅ Disconnected \`${device.id}\``);
+      } else if (device.type === "emulator" && !launchedEmulator) {
+        lines.push(`ℹ️ Emulator \`${device.id}\` was not launched by this session — left running.`);
+      }
+
+      // Clear config
+      savedDevice = null;
+      saveDeviceConfig(ctx.cwd, null);
+
+      return {
+        content: [{ type: "text", text: lines.join("\n") || "Disconnected." }],
+        details: { previous: device },
+      };
+    },
+  });
+
   // --- Flutter Tools ---
 
   pi.registerTool({
@@ -46,14 +666,72 @@ export default function (pi: ExtensionAPI) {
       args: Type.Optional(Type.Array(Type.String(), { description: "Additional arguments" })),
     }),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
+      const project = resolveProject(ctx.cwd);
       const args = ["build", params.target, ...(params.args || [])];
-      onUpdate?.({ content: [{ type: "text", text: `Running: flutter ${args.join(" ")}` }] });
-      
-      const result = await ctx.exec("flutter", args);
+      const commandLabel = `flutter ${args.join(" ")}`;
+
+      // Fire-and-forget: spawn in background, return immediately.
+      // Progress is streamed via pi.sendMessage(). Completion is signaled
+      // via a follow-up message that triggers a new agent turn.
+      const buildProcess = spawn("flutter", args, { cwd: project.path });
+      let buildOutput = "";
+      let lastProgressTime = Date.now();
+      const PROGRESS_INTERVAL_MS = 10_000; // throttle progress updates
+
+      buildProcess.stdout?.on("data", (data: Buffer) => {
+        const str = data.toString();
+        buildOutput += str;
+        if (buildOutput.length > 200_000) buildOutput = buildOutput.slice(-100_000);
+
+        const now = Date.now();
+        if (now - lastProgressTime >= PROGRESS_INTERVAL_MS) {
+          lastProgressTime = now;
+          pi.sendMessage(
+            {
+              customType: "build_progress",
+              content: `Build ${params.target} in progress…\n\n${buildOutput.slice(-3000)}`,
+              display: true,
+              details: { target: params.target, bytesOutput: buildOutput.length },
+            },
+            { deliverAs: "steer" },
+          );
+        }
+      });
+
+      buildProcess.stderr?.on("data", (data: Buffer) => {
+        buildOutput += data.toString();
+        if (buildOutput.length > 200_000) buildOutput = buildOutput.slice(-100_000);
+      });
+
+      buildProcess.on("exit", (code) => {
+        const ok = code === 0;
+        pi.sendMessage(
+          {
+            customType: "build_result",
+            content: `Flutter build ${params.target} ${ok ? "✅ succeeded" : `❌ failed (exit ${code})`}.\n\n${buildOutput.slice(-4000)}`,
+            display: true,
+            details: { exitCode: code, target: params.target },
+          },
+          { deliverAs: "followUp", triggerTurn: true },
+        );
+      });
+
+      // Handle early termination via AbortSignal
+      signal?.addEventListener("abort", () => {
+        buildProcess.kill();
+      });
+
       return {
-        content: [{ type: "text", text: result.output }],
-        details: { exitCode: result.exitCode },
-        isError: result.exitCode !== 0,
+        content: [
+          {
+            type: "text",
+            text:
+              `🚀 Build started in background: ${commandLabel}\n\n` +
+              `The agent will be notified when complete. You can continue with other tasks ` +
+              `while the build runs (first builds can take 30+ minutes).`,
+          },
+        ],
+        details: { background: true, target: params.target },
       };
     },
   });
@@ -67,55 +745,114 @@ export default function (pi: ExtensionAPI) {
       args: Type.Optional(Type.Array(Type.String(), { description: "Additional arguments" })),
     }),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
+      const project = resolveProject(ctx.cwd);
       const targetDevice = params.device || deviceId;
       if (flutterProcess) {
-        return {
-          content: [{ type: "text", text: "Flutter is already running. Use flutter_hot_reload or flutter_stop first." }],
-          isError: true,
-        };
+        throw new Error("Flutter is already running. Use flutter_hot_reload or flutter_stop first.");
       }
 
       const args = ["run", ...(targetDevice ? ["-d", targetDevice] : []), ...(params.args || [])];
-      onUpdate?.({ content: [{ type: "text", text: `Starting: flutter ${args.join(" ")}` }] });
+      const commandLabel = `flutter ${args.join(" ")}`;
 
+      // Fire-and-forget: spawn, return immediately, stream progress.
+      // Notify the agent when the VM service URL is captured (app started)
+      // or when the process exits unexpectedly.
       flutterProcess = spawn("flutter", args, {
-        cwd: ctx.cwd,
+        cwd: project.path,
         stdio: ["pipe", "pipe", "pipe"],
       });
+      let started = false;
+      let lastProgressTime = Date.now();
+      const PROGRESS_INTERVAL_MS = 10_000;
 
-      flutterProcess.stdout?.on("data", (data) => {
+      flutterProcess.stdout?.on("data", (data: Buffer) => {
         const str = data.toString();
         flutterOutput += str;
+        if (flutterOutput.length > 200_000) flutterOutput = flutterOutput.slice(-100_000);
 
-        // Try to capture VM Service URL
-        const match = str.match(/Dart VM Service.*?available at: (https?:\/\/[^\s\/]+:\d+\/[^\s]+)/);
-        if (match) {
-          vmServiceUrl = match[1];
+        // Capture VM Service URL on first match
+        if (!started) {
+          const match = str.match(/Dart VM Service.*?available at: (https?:\/\/[^\s\/]+:\d+\/[^\s]+)/);
+          if (match) {
+            vmServiceUrl = match[1];
+            started = true;
+            pi.sendMessage(
+              {
+                customType: "run_started",
+                content: `✅ Flutter app is running!\n\nDevice: ${targetDevice || "default"}\nVM Service: ${vmServiceUrl}\n\nHot reload and inspect tools are now available.`,
+                display: true,
+                details: { running: true, vmServiceUrl },
+              },
+              { deliverAs: "followUp", triggerTurn: true },
+            );
+          }
         }
 
-        if (flutterOutput.length > 100000) {
-          flutterOutput = flutterOutput.slice(-50000);
+        // Periodic progress while app hasn't started yet
+        if (!started) {
+          const now = Date.now();
+          if (now - lastProgressTime >= PROGRESS_INTERVAL_MS) {
+            lastProgressTime = now;
+            pi.sendMessage(
+              {
+                customType: "run_progress",
+                content: `App starting…\n\n${flutterOutput.slice(-2000)}`,
+                display: true,
+                details: { bytesOutput: flutterOutput.length },
+              },
+              { deliverAs: "steer" },
+            );
+          }
         }
       });
 
-      flutterProcess.stderr?.on("data", (data) => {
+      flutterProcess.stderr?.on("data", (data: Buffer) => {
         const str = data.toString();
         flutterOutput += str;
-        if (flutterOutput.length > 100000) {
-          flutterOutput = flutterOutput.slice(-50000);
-        }
+        if (flutterOutput.length > 200_000) flutterOutput = flutterOutput.slice(-100_000);
       });
 
       flutterProcess.on("exit", (code) => {
         flutterProcess = null;
+        if (!started) {
+          pi.sendMessage(
+            {
+              customType: "run_failed",
+              content: `❌ Flutter run exited before app started (code ${code}).\n\n${flutterOutput.slice(-4000)}`,
+              display: true,
+              details: { exitCode: code, started: false },
+            },
+            { deliverAs: "followUp", triggerTurn: true },
+          );
+        } else {
+          pi.sendMessage(
+            {
+              customType: "run_stopped",
+              content: `Flutter app stopped (exit code ${code}).`,
+              display: true,
+              details: { exitCode: code, started: true },
+            },
+            { deliverAs: "followUp", triggerTurn: true },
+          );
+        }
       });
 
-      // Wait a bit to see if it starts successfully or fails immediately
-      await new Promise((resolve) => setTimeout(resolve, 5000));
+      signal?.addEventListener("abort", () => {
+        flutterProcess?.kill();
+        flutterProcess = null;
+      });
 
       return {
-        content: [{ type: "text", text: `Flutter run started in background.\n\nRecent output:\n${flutterOutput.slice(-1000)}` }],
-        details: { running: !!flutterProcess },
+        content: [
+          {
+            type: "text",
+            text:
+              `🚀 Starting app: ${commandLabel}\n\n` +
+              `The agent will be notified when the app is running. You can continue ` +
+              `with other tasks while it starts.`,
+          },
+        ],
+        details: { background: true },
       };
     },
   });
@@ -127,10 +864,10 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({}),
     async execute() {
       if (!flutterProcess || !flutterProcess.stdin) {
-        return { content: [{ type: "text", text: "Flutter app is not running." }], isError: true };
+        throw new Error("Flutter app is not running.");
       }
       flutterProcess.stdin.write("r");
-      return { content: [{ type: "text", text: "Sent hot reload command ('r') to Flutter process." }] };
+      return { content: [{ type: "text", text: "Sent hot reload command ('r') to Flutter process." }], details: {} };
     },
   });
 
@@ -141,10 +878,10 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({}),
     async execute() {
       if (!flutterProcess || !flutterProcess.stdin) {
-        return { content: [{ type: "text", text: "Flutter app is not running." }], isError: true };
+        throw new Error("Flutter app is not running.");
       }
       flutterProcess.stdin.write("R");
-      return { content: [{ type: "text", text: "Sent hot restart command ('R') to Flutter process." }] };
+      return { content: [{ type: "text", text: "Sent hot restart command ('R') to Flutter process." }], details: {} };
     },
   });
 
@@ -155,11 +892,11 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({}),
     async execute() {
       if (!flutterProcess) {
-        return { content: [{ type: "text", text: "Flutter app is not running." }] };
+        return { content: [{ type: "text", text: "Flutter app is not running." }], details: {} };
       }
       flutterProcess.kill();
       flutterProcess = null;
-      return { content: [{ type: "text", text: "Stopped Flutter process." }] };
+      return { content: [{ type: "text", text: "Stopped Flutter process." }], details: {} };
     },
   });
 
@@ -172,12 +909,15 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(toolCallId, params) {
       if (!flutterProcess) {
-        return { content: [{ type: "text", text: "Flutter app is not running." }], isError: true };
+        throw new Error("Flutter app is not running.");
       }
       // Since we are capturing output in a variable in the closure
       // We need to make sure we are actually storing it.
       // I'll update the stdout handler to keep a buffer.
-      return { content: [{ type: "text", text: `Recent logs:\n${flutterOutput.slice(-(params.lines || 100) * 100)}` }] };
+      return {
+        content: [{ type: "text", text: `Recent logs:\n${flutterOutput.slice(-(params.lines || 100) * 100)}` }],
+        details: {},
+      };
     },
   });
 
@@ -191,12 +931,12 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       if (!vmServiceUrl) {
-        return { content: [{ type: "text", text: "VM Service URL not found. Is the app running and log capturing working?" }], isError: true };
+        throw new Error("VM Service URL not found. Is the app running and log capturing working?");
       }
 
       const script = `
 const WebSocket = require('ws');
-const url = '${vmServiceUrl.replace('http', 'ws')}ws';
+const url = '${vmServiceUrl.replace("http", "ws")}ws';
 const ws = new WebSocket(url);
 ws.on('open', () => {
   ws.send(JSON.stringify({ jsonrpc: '2.0', id: '1', method: 'getVM' }));
@@ -212,7 +952,9 @@ ws.on('message', (data) => {
       params: { isolateId, ...${JSON.stringify(params.params || {})} }
     }));
   } else if (resp.id === '2') {
-    if (resp.result && resp.result.result) {
+    if (resp.result && resp.result.data !== undefined) {
+        console.log(resp.result.data);
+    } else if (resp.result && resp.result.result) {
         console.log(resp.result.result);
     } else {
         console.log(JSON.stringify(resp.result || resp.error));
@@ -225,14 +967,16 @@ ws.on('error', (e) => { console.error(e); process.exit(1); });
 setTimeout(() => process.exit(1), 5000);
       `;
 
-      const tempFile = join(tmpdir(), \`vm_call_\${Date.now()}.js\`);
+      const tempFile = join(tmpdir(), `vm_call_${Date.now()}.js`);
       writeFileSync(tempFile, script);
       try {
         const result = await ctx.exec("node", [tempFile]);
+        if (result.exitCode !== 0) {
+          throw new Error(`VM call failed (exit ${result.exitCode}):\n${result.output}`);
+        }
         return {
           content: [{ type: "text", text: result.output }],
           details: { exitCode: result.exitCode },
-          isError: result.exitCode !== 0,
         };
       } finally {
         unlinkSync(tempFile);
@@ -246,7 +990,13 @@ setTimeout(() => process.exit(1), 5000);
     description: "Dump the Flutter focus tree",
     parameters: Type.Object({}),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      const result = await (pi as any).tools.flutter_vm_call.execute(toolCallId, { method: "ext.flutter.debugDumpFocusTree" }, signal, onUpdate, ctx);
+      const result = await (pi as any).tools.flutter_vm_call.execute(
+        toolCallId,
+        { method: "ext.flutter.debugDumpFocusTree" },
+        signal,
+        onUpdate,
+        ctx,
+      );
       return result;
     },
   });
@@ -257,7 +1007,13 @@ setTimeout(() => process.exit(1), 5000);
     description: "Dump the Flutter widget tree",
     parameters: Type.Object({}),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      const result = await (pi as any).tools.flutter_vm_call.execute(toolCallId, { method: "ext.flutter.debugDumpApp" }, signal, onUpdate, ctx);
+      const result = await (pi as any).tools.flutter_vm_call.execute(
+        toolCallId,
+        { method: "ext.flutter.debugDumpApp" },
+        signal,
+        onUpdate,
+        ctx,
+      );
       return result;
     },
   });
@@ -271,10 +1027,12 @@ setTimeout(() => process.exit(1), 5000);
     parameters: Type.Object({}),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const result = await ctx.exec("maestro", ["hierarchy"]);
+      if (result.exitCode !== 0) {
+        throw new Error(`maestro hierarchy failed (exit ${result.exitCode}):\n${result.output}`);
+      }
       return {
         content: [{ type: "text", text: result.output }],
         details: { exitCode: result.exitCode },
-        isError: result.exitCode !== 0,
       };
     },
   });
@@ -289,10 +1047,12 @@ setTimeout(() => process.exit(1), 5000);
     }),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const result = await ctx.exec("maestro", ["test", params.flowFile, ...(params.args || [])]);
+      if (result.exitCode !== 0) {
+        throw new Error(`maestro test failed (exit ${result.exitCode}):\n${result.output}`);
+      }
       return {
         content: [{ type: "text", text: result.output }],
         details: { exitCode: result.exitCode },
-        isError: result.exitCode !== 0,
       };
     },
   });
@@ -308,14 +1068,16 @@ setTimeout(() => process.exit(1), 5000);
       const tempFile = join(tmpdir(), `maestro_action_${Date.now()}.yaml`);
       const currentAppId = appId || process.env.APP_ID || "com.example.app";
       const flowContent = `appId: ${currentAppId}\n---\n${params.action.startsWith("-") ? params.action : "- " + params.action}`;
-      
+
       writeFileSync(tempFile, flowContent);
       try {
         const result = await ctx.exec("maestro", ["test", tempFile]);
+        if (result.exitCode !== 0) {
+          throw new Error(`maestro action failed (exit ${result.exitCode}):\n${result.output}`);
+        }
         return {
           content: [{ type: "text", text: result.output }],
           details: { exitCode: result.exitCode },
-          isError: result.exitCode !== 0,
         };
       } finally {
         unlinkSync(tempFile);

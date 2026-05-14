@@ -1,0 +1,5 @@
+appId: com.pi.extension.test_app
+---
+- tapOn: "increment-button"
+- tapOn: "increment-button"
+- assertVisible: "Count: 2"
