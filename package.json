@@ -23,5 +23,8 @@
     "@types/node": "^25.7.0",
     "typebox": "^1.1.38",
     "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "ws": "^8.20.1"
   }
 }

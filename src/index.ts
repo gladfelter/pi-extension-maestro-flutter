@@ -10,6 +10,7 @@ export default function (pi: ExtensionAPI) {
   let flutterOutput = "";
   let appId: string | null = null;
   let deviceId: string | null = null;
+  let vmServiceUrl: string | null = null;
 
   pi.on("session_shutdown", async () => {
     if (flutterProcess) {
@@ -85,6 +86,13 @@ export default function (pi: ExtensionAPI) {
       flutterProcess.stdout?.on("data", (data) => {
         const str = data.toString();
         flutterOutput += str;
+
+        // Try to capture VM Service URL
+        const match = str.match(/Dart VM Service.*?available at: (https?:\/\/[^\s\/]+:\d+\/[^\s]+)/);
+        if (match) {
+          vmServiceUrl = match[1];
+        }
+
         if (flutterOutput.length > 100000) {
           flutterOutput = flutterOutput.slice(-50000);
         }
@@ -170,6 +178,87 @@ export default function (pi: ExtensionAPI) {
       // We need to make sure we are actually storing it.
       // I'll update the stdout handler to keep a buffer.
       return { content: [{ type: "text", text: `Recent logs:\n${flutterOutput.slice(-(params.lines || 100) * 100)}` }] };
+    },
+  });
+
+  pi.registerTool({
+    name: "flutter_vm_call",
+    label: "Flutter VM Call",
+    description: "Call a Flutter VM Service extension (e.g., ext.flutter.debugDumpApp)",
+    parameters: Type.Object({
+      method: Type.String({ description: "Service extension method name" }),
+      params: Type.Optional(Type.Any({ description: "Method parameters" })),
+    }),
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      if (!vmServiceUrl) {
+        return { content: [{ type: "text", text: "VM Service URL not found. Is the app running and log capturing working?" }], isError: true };
+      }
+
+      const script = `
+const WebSocket = require('ws');
+const url = '${vmServiceUrl.replace('http', 'ws')}ws';
+const ws = new WebSocket(url);
+ws.on('open', () => {
+  ws.send(JSON.stringify({ jsonrpc: '2.0', id: '1', method: 'getVM' }));
+});
+ws.on('message', (data) => {
+  const resp = JSON.parse(data.toString());
+  if (resp.id === '1') {
+    const isolateId = resp.result.isolates[0].id;
+    ws.send(JSON.stringify({
+      jsonrpc: '2.0',
+      id: '2',
+      method: '${params.method}',
+      params: { isolateId, ...${JSON.stringify(params.params || {})} }
+    }));
+  } else if (resp.id === '2') {
+    if (resp.result && resp.result.result) {
+        console.log(resp.result.result);
+    } else {
+        console.log(JSON.stringify(resp.result || resp.error));
+    }
+    ws.close();
+    process.exit(0);
+  }
+});
+ws.on('error', (e) => { console.error(e); process.exit(1); });
+setTimeout(() => process.exit(1), 5000);
+      `;
+
+      const tempFile = join(tmpdir(), \`vm_call_\${Date.now()}.js\`);
+      writeFileSync(tempFile, script);
+      try {
+        const result = await ctx.exec("node", [tempFile]);
+        return {
+          content: [{ type: "text", text: result.output }],
+          details: { exitCode: result.exitCode },
+          isError: result.exitCode !== 0,
+        };
+      } finally {
+        unlinkSync(tempFile);
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "flutter_inspect_focus",
+    label: "Flutter Inspect Focus",
+    description: "Dump the Flutter focus tree",
+    parameters: Type.Object({}),
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      const result = await (pi as any).tools.flutter_vm_call.execute(toolCallId, { method: "ext.flutter.debugDumpFocusTree" }, signal, onUpdate, ctx);
+      return result;
+    },
+  });
+
+  pi.registerTool({
+    name: "flutter_inspect_tree",
+    label: "Flutter Inspect Tree",
+    description: "Dump the Flutter widget tree",
+    parameters: Type.Object({}),
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      const result = await (pi as any).tools.flutter_vm_call.execute(toolCallId, { method: "ext.flutter.debugDumpApp" }, signal, onUpdate, ctx);
+      return result;
     },
   });
 
