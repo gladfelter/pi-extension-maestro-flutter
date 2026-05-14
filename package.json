@@ -1,0 +1,27 @@
+{
+  "name": "pi-extension-maestro-flutter",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gladfelter/pi-extension-maestro-flutter.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/gladfelter/pi-extension-maestro-flutter/issues"
+  },
+  "homepage": "https://github.com/gladfelter/pi-extension-maestro-flutter#readme",
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.74.0",
+    "@types/node": "^25.7.0",
+    "typebox": "^1.1.38",
+    "typescript": "^6.0.3"
+  }
+}
