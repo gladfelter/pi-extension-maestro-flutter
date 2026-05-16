@@ -80,7 +80,7 @@ describe("device config", () => {
 
   describe("roundtrip", () => {
     it("save then load returns the same device", () => {
-      const device = { id: "emulator-5554", type: "emulator", name: "test_34" };
+      const device = { id: "emulator-5554", type: "emulator" as const, name: "test_34" };
       saveDeviceConfig("/project", device, fs);
       expect(loadDeviceConfig("/project", fs)).toEqual(device);
     });

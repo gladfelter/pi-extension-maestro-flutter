@@ -15,18 +15,18 @@ import { spawn, ChildProcess } from "node:child_process";
 import { writeFileSync, unlinkSync, readdirSync, existsSync, readFileSync, mkdirSync } from "node:fs";
 import { join, dirname, relative } from "node:path";
 import { homedir } from "node:os";
-
-interface SavedDevice {
-  id: string;
-  type: "ip" | "emulator";
-  name?: string;
-}
-
-interface FlutterProject {
-  name: string;
-  path: string;
-  relPath: string;
-}
+import { loadDeviceConfig, saveDeviceConfig } from "./common/device-config.js";
+import type { SavedDevice } from "./common/device-config.js";
+import { loadProjectConfig, saveProjectConfig } from "./common/project-config.js";
+import type { FlutterProject } from "./common/project-config.js";
+import {
+  extractPackageFromManifest,
+  extractPackageFromGradleKts,
+  extractPackageFromGradle,
+} from "./common/package-name.js";
+import { parseAdbDevices, isEmulatorSerial } from "./common/emulator.js";
+import { walkAccessibilityTree, detectTextFieldIssues, filterLabels, formatLabelsOutput } from "./common/semantics.js";
+import { findFlutterProjects } from "./common/project-discovery.js";
 
 // Extend ChildProcess to carry vmServiceUrl
 interface TrackedFlutterProcess extends ChildProcess {
@@ -40,118 +40,8 @@ export default function (pi: ExtensionAPI) {
   let savedDevice: SavedDevice | null = null;
   let launchedEmulator: string | null = null;
 
-  // ── Device config file (.pi/device.json) ───────────────────────────
-  function deviceConfigPath(cwd: string): string {
-    return join(cwd, ".pi", "device.json");
-  }
-
-  function loadDeviceConfig(cwd: string): SavedDevice | null {
-    try {
-      const path = deviceConfigPath(cwd);
-      if (!existsSync(path)) return null;
-      return JSON.parse(readFileSync(path, "utf-8")) as SavedDevice;
-    } catch {
-      return null;
-    }
-  }
-
-  function saveDeviceConfig(cwd: string, device: SavedDevice | null) {
-    const path = deviceConfigPath(cwd);
-    if (device === null) {
-      try {
-        unlinkSync(path);
-      } catch {
-        /* didn't exist */
-      }
-      return;
-    }
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, JSON.stringify(device, null, 2) + "\n", "utf-8");
-  }
-
-  // ── Flutter project discovery ───────────────────────────────────────
-
-  const SKIP_DIRS = new Set([
-    ".git",
-    "node_modules",
-    "build",
-    ".dart_tool",
-    ".pi",
-    "android",
-    "ios",
-    "linux",
-    "macos",
-    "windows",
-    "web",
-  ]);
-
-  function findFlutterProjects(root: string, maxDepth = 4): FlutterProject[] {
-    const results: FlutterProject[] = [];
-
-    function scan(dir: string, depth: number) {
-      if (depth > maxDepth) return;
-      try {
-        const entries = readdirSync(dir, { withFileTypes: true });
-        for (const entry of entries) {
-          const name = entry.name as string;
-          if (name.startsWith(".") || SKIP_DIRS.has(name)) continue;
-          if (!entry.isDirectory()) continue;
-          const fullPath = join(dir, name);
-          if (existsSync(join(fullPath, "pubspec.yaml"))) {
-            try {
-              const content = readFileSync(join(fullPath, "pubspec.yaml"), "utf-8");
-              const nameMatch = content.match(/^name:\s*(.+)$/m);
-              results.push({
-                name: nameMatch?.[1]?.trim() || name,
-                path: fullPath,
-                relPath: relative(root, fullPath),
-              });
-            } catch {
-              /* skip unreadable */
-            }
-          } else {
-            scan(fullPath, depth + 1);
-          }
-        }
-      } catch {
-        return;
-      }
-    }
-
-    scan(root, 0);
-    return results;
-  }
-
   let selectedProject: FlutterProject | null = null;
   let activeSessionId: string | null = null;
-
-  function projectConfigPath(cwd: string): string {
-    return join(cwd, ".pi", "flutter-project.json");
-  }
-
-  function loadProjectConfig(cwd: string): FlutterProject | null {
-    try {
-      const path = projectConfigPath(cwd);
-      if (!existsSync(path)) return null;
-      return JSON.parse(readFileSync(path, "utf-8")) as FlutterProject;
-    } catch {
-      return null;
-    }
-  }
-
-  function saveProjectConfig(cwd: string, project: FlutterProject | null) {
-    const path = projectConfigPath(cwd);
-    if (project === null) {
-      try {
-        unlinkSync(path);
-      } catch {
-        /* didn't exist */
-      }
-      return;
-    }
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, JSON.stringify(project, null, 2) + "\n", "utf-8");
-  }
 
   function resolveProject(cwd: string): FlutterProject {
     if (selectedProject && existsSync(join(selectedProject.path, "pubspec.yaml"))) {
@@ -183,6 +73,7 @@ export default function (pi: ExtensionAPI) {
 
   // ── Session hooks ──────────────────────────────────────────────────
   pi.on("session_start", async (event, ctx) => {
+    // @ts-ignore - sessionId exists at runtime
     activeSessionId = event.sessionId;
     const device = loadDeviceConfig(ctx.cwd);
     if (device) {
@@ -243,40 +134,38 @@ export default function (pi: ExtensionAPI) {
     const emulators: Array<{ serial: string; avdName: string }> = [];
     try {
       const adbResult = await pi.exec("adb", ["devices"], { timeout: 5000 });
-      for (const line of adbResult.stdout.split("\n")) {
-        const parts = line.trim().split(/\s+/);
-        if (parts[0]?.startsWith("emulator-") && parts[1] === "device") {
-          const serial = parts[0];
-          // Get the AVD name via system property
-          try {
-            const avdResult = await pi.exec("adb", ["-s", serial, "shell", "getprop", "ro.kernel.qemu.avd_name"], {
-              timeout: 2000,
-            });
-            const avdName = avdResult.stdout.trim();
-            if (avdName) {
-              emulators.push({ serial, avdName });
-              continue;
-            }
-          } catch {
-            /* getprop not available on this device */
+      const devices = parseAdbDevices(adbResult.stdout);
+      for (const { serial, status } of devices) {
+        if (!isEmulatorSerial(serial) || status !== "device") continue;
+        // Get the AVD name via system property
+        try {
+          const avdResult = await pi.exec("adb", ["-s", serial, "shell", "getprop", "ro.kernel.qemu.avd_name"], {
+            timeout: 2000,
+          });
+          const avdName = avdResult.stdout.trim();
+          if (avdName) {
+            emulators.push({ serial, avdName });
+            continue;
           }
-          // Fallback: try adb emu command
-          try {
-            const emuResult = await pi.exec("adb", ["-s", serial, "emu", "avd", "name"], { timeout: 2000 });
-            const avdName = emuResult.stdout
-              .trim()
-              .replace(/^OK\s*\n?/i, "")
-              .trim();
-            if (avdName) {
-              emulators.push({ serial, avdName });
-              continue;
-            }
-          } catch {
-            /* emu command not available */
-          }
-          // Last resort: just include the serial with empty AVD name
-          emulators.push({ serial, avdName: "" });
+        } catch {
+          /* getprop not available on this device */
         }
+        // Fallback: try adb emu command
+        try {
+          const emuResult = await pi.exec("adb", ["-s", serial, "emu", "avd", "name"], { timeout: 2000 });
+          const avdName = emuResult.stdout
+            .trim()
+            .replace(/^OK\s*\n?/i, "")
+            .trim();
+          if (avdName) {
+            emulators.push({ serial, avdName });
+            continue;
+          }
+        } catch {
+          /* emu command not available */
+        }
+        // Last resort: just include the serial with empty AVD name
+        emulators.push({ serial, avdName: "" });
       }
     } catch {
       /* adb not available */
@@ -298,13 +187,8 @@ export default function (pi: ExtensionAPI) {
   async function isAdbDeviceConnected(serial: string): Promise<boolean> {
     try {
       const adbResult = await pi.exec("adb", ["devices"], { timeout: 5000 });
-      for (const line of adbResult.stdout.split("\n")) {
-        const parts = line.trim().split(/\s+/);
-        if (parts[0] === serial && parts[1] === "device") {
-          return true;
-        }
-      }
-      return false;
+      const devices = parseAdbDevices(adbResult.stdout);
+      return devices.some((d) => d.serial === serial && d.status === "device");
     } catch {
       return false;
     }
@@ -344,19 +228,15 @@ export default function (pi: ExtensionAPI) {
       // Try manifest first (older Flutter projects)
       const manifestPath = join(project.path, "android", "app", "src", "main", "AndroidManifest.xml");
       if (existsSync(manifestPath)) {
-        const manifest = readFileSync(manifestPath, "utf-8");
-        const pkgMatch = manifest.match(/package="([^"]+)"/);
-        if (pkgMatch) return pkgMatch[1];
+        const pkg = extractPackageFromManifest(readFileSync(manifestPath, "utf-8"));
+        if (pkg) return pkg;
       }
 
       // Try build.gradle.kts (modern Flutter / Kotlin DSL)
       const gradleKtsPath = join(project.path, "android", "app", "build.gradle.kts");
       if (existsSync(gradleKtsPath)) {
-        const gradleKts = readFileSync(gradleKtsPath, "utf-8");
-        const appIdMatch = gradleKts.match(/applicationId\s*=\s*["']([^"']+)["']/);
-        const namespaceMatch = gradleKts.match(/namespace\s*=\s*["']([^"']+)["']/);
-        const name = appIdMatch?.[1] || namespaceMatch?.[1];
-        if (name) return name;
+        const pkg = extractPackageFromGradleKts(readFileSync(gradleKtsPath, "utf-8"));
+        if (pkg) return pkg;
       }
 
       // Try build.gradle (Groovy DSL)
@@ -1113,96 +993,17 @@ setTimeout(() => { console.error('Timeout'); process.exit(1); }, 15000);
         throw new Error(`Failed to parse maestro hierarchy JSON:\n${result.stdout.slice(0, 500)}`);
       }
 
-      // Recursively extract leaf nodes with accessibility text
-      // Also detects TextField semantics issues where Semantics.label ends up in hintText
-      // instead of accessibilityText (a common Flutter+Android accessibility quirk).
-      const labels: Array<{ label: string; text?: string; hintText?: string; clickable: boolean; bounds: string }> = [];
-      const textFieldIssues: Array<{ hintTextLabel: string; bounds: string; className: string }> = [];
-      function walk(node: unknown) {
-        if (!node || typeof node !== "object" || Array.isArray(node)) return;
-        const obj = node as Record<string, unknown>;
-        const attrs = obj.attributes as Record<string, string> | undefined;
-        if (attrs) {
-          const accessibilityText = attrs.accessibilityText || "";
-          const text = attrs.text || "";
-          const hintText = attrs.hintText || "";
-          const clickable = attrs.clickable === "true";
-          const bounds = attrs.bounds || "";
-          const className = attrs.class || "";
-          // Include if it has meaningful text/hint and is a leaf or clickable
-          if (
-            (accessibilityText || text || hintText) &&
-            (!obj.children || (obj.children as unknown[]).length === 0 || clickable)
-          ) {
-            labels.push({
-              label: accessibilityText,
-              text: text || undefined,
-              hintText: hintText || undefined,
-              clickable,
-              bounds,
-            });
-          }
-          // Detect TextField semantics issue: label present in hintText but not in accessibilityText
-          // This happens when Semantics(label: "...") wraps a TextField — Android places it in hintText.
-          if (hintText && !accessibilityText && className === "android.widget.EditText") {
-            // Extract the first line of hintText (usually the Semantics label)
-            const firstLine = hintText.split("\n")[0].trim();
-            if (firstLine) {
-              textFieldIssues.push({ hintTextLabel: firstLine, bounds, className });
-            }
-          }
-        }
-        if (Array.isArray(obj.children)) {
-          for (const child of obj.children) walk(child);
-        }
-      }
-      walk(tree);
+      // Use extracted semantics parsing (tested in common/semantics.test.ts)
+      const labels = walkAccessibilityTree(tree);
+      const textFieldIssues = detectTextFieldIssues(tree);
 
-      const searchQuery = params.search?.toLowerCase();
-      const filtered = searchQuery
-        ? labels.filter(
-            (l) =>
-              l.label.toLowerCase().includes(searchQuery) ||
-              l.text?.toLowerCase().includes(searchQuery) ||
-              l.hintText?.toLowerCase().includes(searchQuery),
-          )
-        : labels;
+      const filtered = filterLabels(labels, params.search || "");
 
-      const lines = filtered.map((l) => {
-        const click = l.clickable ? "👆" : "";
-        const hint = l.hintText && !l.label ? ` ⚠️ hint-only: \`${l.hintText.split("\n")[0]}\`` : "";
-        const extra = l.text && l.text !== l.label ? ` [${l.text}]` : "";
-        return `${click} \`${l.label || l.text}\` — ${l.bounds}${extra}${hint}`;
-      });
-
-      // Hard limit: truncate if output would be too large (>4KB)
-      const MAX_OUTPUT_BYTES = 4096;
-      const joined = lines.join("\n");
-      const truncated = joined.length > MAX_OUTPUT_BYTES;
-      let output = truncated
-        ? joined.slice(0, MAX_OUTPUT_BYTES) + "\n... (truncated, use search to find specific labels)"
-        : joined;
-
-      // Append TextField semantics warning if detected
-      if (textFieldIssues.length > 0) {
-        const issueLabels = textFieldIssues.map((i) => `  - \`${i.hintTextLabel}\``).join("\n");
-        output += `\n\n⚠️ TextField semantics issue detected (${textFieldIssues.length} field${textFieldIssues.length > 1 ? "s" : ""})\n`;
-        output += `These Semantics labels are in \`hintText\` (not \`accessibilityText\`) and won't be found by maestro tapOn:\n${issueLabels}\n\n`;
-        output += `This is a known Flutter+Android quirk: Semantics(label) wrapping TextField places the label in hintText.\n`;
-        output += `Fix options:\n`;
-        output += `  1. Use Semantics(label: "...", explicitChildNodes: true) to force the label into accessibilityText\n`;
-        output += `  2. Use InputDecoration(semanticLabel: "...") on the TextField directly\n`;
-        output += `  3. Wrap with ExcludeSemantics() + Semantics() to override the TextField's default semantics\n`;
-      }
+      const output = formatLabelsOutput(filtered, labels.length, textFieldIssues);
 
       return {
-        content: [
-          {
-            type: "text",
-            text: output,
-          },
-        ],
-        details: { count: filtered.length, total: labels.length, truncated, textFieldIssues: textFieldIssues.length },
+        content: [{ type: "text", text: output }],
+        details: { count: filtered.length, total: labels.length, textFieldIssues: textFieldIssues.length },
       };
     },
   });
