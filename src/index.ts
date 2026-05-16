@@ -222,17 +222,38 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ── Cleanup on shutdown ─────────────────────────────────────────────
-  pi.on("session_shutdown", async () => {
-    if (flutterProcess) {
+  pi.on("session_shutdown", async (event) => {
+    // On reload, skip killing the emulator — it's an external process that
+    // persists beyond the extension runtime. We'll re-detect it on startup.
+    if (event.reason !== "reload" && flutterProcess) {
       flutterProcess.kill();
       flutterProcess = null;
     }
-    if (launchedEmulator) {
+    if (event.reason !== "reload" && launchedEmulator) {
       await pi.exec("adb", ["-s", launchedEmulator, "emu", "kill"]);
       launchedEmulator = null;
     }
-    if (savedDevice?.type === "ip") {
+    if (event.reason !== "reload" && savedDevice?.type === "ip") {
       await pi.exec("adb", ["disconnect", savedDevice.id]);
+    }
+  });
+
+  // ── Re-detect external state on reload ────────────────────────────────
+  pi.on("session_start", async (event) => {
+    if (event.reason === "reload" && savedDevice?.type === "emulator") {
+      // Check if the emulator we launched is still running
+      try {
+        const adbResult = await pi.exec("adb", ["devices"]);
+        for (const line of adbResult.stdout.split("\n")) {
+          if (line.startsWith("emulator-") && line.includes("device")) {
+            const serial = line.split(/\s+/)[0];
+            launchedEmulator = serial;
+            break;
+          }
+        }
+      } catch {
+        // adb not available, ignore
+      }
     }
   });
 
@@ -320,22 +341,32 @@ export default function (pi: ExtensionAPI) {
       if (targetId.startsWith("emulator-avd:") || !targetId.includes(":")) {
         // Treat as AVD name
         const avdName = targetId.startsWith("emulator-avd:") ? targetId.replace("emulator-avd:", "") : targetId;
+        // Pre-flight: check KVM on Linux
+        if (process.platform === "linux") {
+          const kvm = await checkKvm();
+          if (!kvm.available) {
+            ctx.ui.notify(`KVM not available: ${kvm.hint || "emulator will be extremely slow"}`, "error");
+            return;
+          }
+        }
+
         // Shell out to flutter emulators --launch (non-blocking notify first)
         ctx.ui.notify(`Launching emulator ${avdName}...`, "info");
         const result = await pi.exec("flutter", ["emulators", "--launch", avdName]);
-        if (result.exitCode !== 0) {
-          ctx.ui.notify(`Failed to launch: ${result.output}`, "error");
+        if (result.code !== 0) {
+          const msg = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
+          ctx.ui.notify(`Failed to launch: ${msg}`, "error");
           return;
         }
         // Wait for boot and find serial (up to 120s)
         for (let i = 0; i < 60; i++) {
           await new Promise((r) => setTimeout(r, 2000));
           const check = await pi.exec("adb", ["devices"]);
-          for (const line of check.output.split("\n")) {
+          for (const line of check.stdout.split("\n")) {
             if (line.startsWith("emulator-") && line.includes("device")) {
               const serial = line.split(/\s+/)[0];
               const booted = await pi.exec("adb", ["-s", serial, "shell", "getprop", "sys.boot_completed"]);
-              if (booted.output.trim() === "1") {
+              if (booted.stdout.trim() === "1") {
                 savedDevice = { id: serial, type: "emulator", name: avdName };
                 launchedEmulator = serial;
                 saveDeviceConfig(ctx.cwd, savedDevice);
@@ -351,8 +382,8 @@ export default function (pi: ExtensionAPI) {
 
       // IP:port
       const result = await pi.exec("adb", ["connect", targetId]);
-      if (result.exitCode !== 0 || result.output.includes("failed")) {
-        ctx.ui.notify(`Connection failed: ${result.output}`, "error");
+      if (result.code !== 0 || result.stdout.includes("failed")) {
+        ctx.ui.notify(`Connection failed: ${result.stdout}`, "error");
         return;
       }
       savedDevice = { id: targetId, type: "ip" };
@@ -386,13 +417,47 @@ export default function (pi: ExtensionAPI) {
   // ── Device Discovery & Connection ───────────────────────────────────
 
   /** Collect all discoverable Flutter/ADB devices into DeviceInfo list. */
+  /** Check KVM availability and return a status string. */
+  async function checkKvm(): Promise<{ available: boolean; hint?: string }> {
+    try {
+      // Check if /dev/kvm exists and is accessible
+      const kvmCheck = await pi.exec("sh", ["-c", "test -r /dev/kvm && test -w /dev/kvm && echo ok"]);
+      if (kvmCheck.stdout.trim() === "ok") return { available: true };
+
+      // Check if user is in kvm group
+      const groupCheck = await pi.exec("sh", ["-c", "grep '^kvm:' /etc/group"]);
+      const kvmLine = groupCheck.stdout.trim();
+      const username = process.env.USER || "";
+
+      if (!kvmLine) {
+        return {
+          available: false,
+          hint: `KVM group not found. Create it:\n  sudo groupadd -r kvm\n  sudo gpasswd -a ${username} kvm\nThen log out and back into WSL2.`,
+        };
+      }
+      if (!kvmLine.includes(username)) {
+        return {
+          available: false,
+          hint: `User "${username}" is not in the kvm group (current: "${kvmLine}").\n  sudo gpasswd -a ${username} kvm\nThen log out and back into WSL2.`,
+        };
+      }
+      return {
+        available: false,
+        hint: "/dev/kvm exists but is not accessible. Check permissions:\n  ls -la /dev/kvm",
+      };
+    } catch {
+      // Can't check KVM (e.g., macOS where KVM doesn't apply)
+      return { available: true };
+    }
+  }
+
   async function discoverDevices(): Promise<DeviceInfo[]> {
     const devices: DeviceInfo[] = [];
     const seen = new Set<string>();
 
     // 1. Connected ADB devices
     const adbResult = await pi.exec("adb", ["devices", "-l"]);
-    for (const line of adbResult.output.split("\n")) {
+    for (const line of adbResult.stdout.split("\n")) {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith("List of")) continue;
       const parts = trimmed.split(/\s+/);
@@ -415,10 +480,11 @@ export default function (pi: ExtensionAPI) {
     // 2. Available AVDs (on-disk emulators)
     try {
       const emuResult = await pi.exec("flutter", ["emulators"]);
-      for (const line of emuResult.output.split("\n")) {
+      for (const line of emuResult.stdout.split("\n")) {
         const nameMatch = line.match(/^([^•]+)\s+•\s+(.+)$/);
         if (!nameMatch) continue;
         const name = nameMatch[1].trim();
+        if (name === "Id" || !name) continue; // skip header row
         const id = `emulator-avd:${name}`;
         if (seen.has(id)) continue;
         seen.add(id);
@@ -459,7 +525,7 @@ export default function (pi: ExtensionAPI) {
     // 4. mDNS-advertised ADB devices (Android 11+ wireless debugging)
     try {
       const mdnsResult = await pi.exec("adb", ["mdns", "services"]);
-      for (const line of mdnsResult.output.split("\n")) {
+      for (const line of mdnsResult.stdout.split("\n")) {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith("List of")) continue;
         const parts = trimmed.split(/\s+/);
@@ -550,10 +616,10 @@ export default function (pi: ExtensionAPI) {
 
         // Check if already running
         const adbResult = await pi.exec("adb", ["devices"]);
-        const alreadyRunning = adbResult.output.includes(`emulator-`);
+        const alreadyRunning = adbResult.stdout.includes(`emulator-`);
         if (alreadyRunning) {
           // Find the emulator serial
-          for (const line of adbResult.output.split("\n")) {
+          for (const line of adbResult.stdout.split("\n")) {
             if (line.startsWith("emulator-") && line.includes("device")) {
               const serial = line.split(/\s+/)[0];
               savedDevice = { id: serial, type: "emulator", name: avdName };
@@ -566,10 +632,24 @@ export default function (pi: ExtensionAPI) {
           }
         }
 
+        // Pre-flight: check KVM on Linux (emulator will be unusably slow without it)
+        const platform = process.platform;
+        if (platform === "linux") {
+          const kvm = await checkKvm();
+          if (!kvm.available) {
+            throw new Error(
+              `KVM hardware acceleration is not available.\n` +
+                `The emulator will be extremely slow without it.\n\n` +
+                (kvm.hint || ""),
+            );
+          }
+        }
+
         // Launch via flutter emulators --launch (handles KVM, snapshots, etc.)
         const launchResult = await pi.exec("flutter", ["emulators", "--launch", avdName]);
-        if (launchResult.exitCode !== 0) {
-          throw new Error(`Failed to launch emulator ${avdName}:\n${launchResult.output}`);
+        if (launchResult.code !== 0) {
+          const output = [launchResult.stdout, launchResult.stderr].filter(Boolean).join("\n");
+          throw new Error(`Failed to launch emulator ${avdName}:\n${output.trim()}`);
         }
 
         // Wait for emulator to appear in adb and finish booting
@@ -577,11 +657,11 @@ export default function (pi: ExtensionAPI) {
           if (signal?.aborted) throw new Error("Aborted while waiting for emulator.");
           await new Promise((r) => setTimeout(r, 2000));
           const check = await pi.exec("adb", ["devices"]);
-          for (const line of check.output.split("\n")) {
+          for (const line of check.stdout.split("\n")) {
             if (line.startsWith("emulator-") && line.includes("device")) {
               const serial = line.split(/\s+/)[0];
               const booted = await pi.exec("adb", ["-s", serial, "shell", "getprop", "sys.boot_completed"]);
-              if (booted.output.trim() === "1") {
+              if (booted.stdout.trim() === "1") {
                 savedDevice = { id: serial, type: "emulator", name: avdName };
                 launchedEmulator = serial;
                 saveDeviceConfig(cwd, savedDevice);
@@ -603,8 +683,8 @@ export default function (pi: ExtensionAPI) {
 
       // IP:port — adb connect
       const result = await pi.exec("adb", ["connect", targetId]);
-      if (result.exitCode !== 0 || result.output.includes("failed")) {
-        throw new Error(`ADB connection failed:\n${result.output}`);
+      if (result.code !== 0 || result.stdout.includes("failed")) {
+        throw new Error(`ADB connection failed:\n${result.stdout}`);
       }
       savedDevice = { id: targetId, type: "ip" };
       saveDeviceConfig(cwd, savedDevice);
@@ -971,12 +1051,12 @@ setTimeout(() => process.exit(1), 5000);
       writeFileSync(tempFile, script);
       try {
         const result = await ctx.exec("node", [tempFile]);
-        if (result.exitCode !== 0) {
-          throw new Error(`VM call failed (exit ${result.exitCode}):\n${result.output}`);
+        if (result.code !== 0) {
+          throw new Error(`VM call failed (exit ${result.code}):\n${result.stdout}`);
         }
         return {
-          content: [{ type: "text", text: result.output }],
-          details: { exitCode: result.exitCode },
+          content: [{ type: "text", text: result.stdout }],
+          details: { code: result.code },
         };
       } finally {
         unlinkSync(tempFile);
@@ -1027,12 +1107,12 @@ setTimeout(() => process.exit(1), 5000);
     parameters: Type.Object({}),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const result = await ctx.exec("maestro", ["hierarchy"]);
-      if (result.exitCode !== 0) {
-        throw new Error(`maestro hierarchy failed (exit ${result.exitCode}):\n${result.output}`);
+      if (result.code !== 0) {
+        throw new Error(`maestro hierarchy failed (exit ${result.code}):\n${result.stdout}`);
       }
       return {
-        content: [{ type: "text", text: result.output }],
-        details: { exitCode: result.exitCode },
+        content: [{ type: "text", text: result.stdout }],
+        details: { code: result.code },
       };
     },
   });
@@ -1047,12 +1127,12 @@ setTimeout(() => process.exit(1), 5000);
     }),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const result = await ctx.exec("maestro", ["test", params.flowFile, ...(params.args || [])]);
-      if (result.exitCode !== 0) {
-        throw new Error(`maestro test failed (exit ${result.exitCode}):\n${result.output}`);
+      if (result.code !== 0) {
+        throw new Error(`maestro test failed (exit ${result.code}):\n${result.stdout}`);
       }
       return {
-        content: [{ type: "text", text: result.output }],
-        details: { exitCode: result.exitCode },
+        content: [{ type: "text", text: result.stdout }],
+        details: { code: result.code },
       };
     },
   });
@@ -1072,12 +1152,12 @@ setTimeout(() => process.exit(1), 5000);
       writeFileSync(tempFile, flowContent);
       try {
         const result = await ctx.exec("maestro", ["test", tempFile]);
-        if (result.exitCode !== 0) {
-          throw new Error(`maestro action failed (exit ${result.exitCode}):\n${result.output}`);
+        if (result.code !== 0) {
+          throw new Error(`maestro action failed (exit ${result.code}):\n${result.stdout}`);
         }
         return {
-          content: [{ type: "text", text: result.output }],
-          details: { exitCode: result.exitCode },
+          content: [{ type: "text", text: result.stdout }],
+          details: { code: result.code },
         };
       } finally {
         unlinkSync(tempFile);
