@@ -216,11 +216,19 @@ export default function (pi: ExtensionAPI) {
       flutterProcess = null;
     }
     if (event.reason !== "reload" && launchedEmulator) {
-      await pi.exec("adb", ["-s", launchedEmulator, "emu", "kill"]);
+      try {
+        await pi.exec("adb", ["-s", launchedEmulator, "emu", "kill"], { timeout: 5000 });
+      } catch {
+        /* ignore shutdown errors */
+      }
       launchedEmulator = null;
     }
     if (event.reason !== "reload" && savedDevice?.type === "ip") {
-      await pi.exec("adb", ["disconnect", savedDevice.id]);
+      try {
+        await pi.exec("adb", ["disconnect", savedDevice.id], { timeout: 5000 });
+      } catch {
+        /* ignore shutdown errors */
+      }
     }
   });
 
@@ -234,14 +242,16 @@ export default function (pi: ExtensionAPI) {
   async function getRunningEmulators(): Promise<Array<{ serial: string; avdName: string }>> {
     const emulators: Array<{ serial: string; avdName: string }> = [];
     try {
-      const adbResult = await pi.exec("adb", ["devices"]);
+      const adbResult = await pi.exec("adb", ["devices"], { timeout: 5000 });
       for (const line of adbResult.stdout.split("\n")) {
         const parts = line.trim().split(/\s+/);
         if (parts[0]?.startsWith("emulator-") && parts[1] === "device") {
           const serial = parts[0];
           // Get the AVD name via system property
           try {
-            const avdResult = await pi.exec("adb", ["-s", serial, "shell", "getprop", "ro.kernel.qemu.avd_name"]);
+            const avdResult = await pi.exec("adb", ["-s", serial, "shell", "getprop", "ro.kernel.qemu.avd_name"], {
+              timeout: 2000,
+            });
             const avdName = avdResult.stdout.trim();
             if (avdName) {
               emulators.push({ serial, avdName });
@@ -252,7 +262,7 @@ export default function (pi: ExtensionAPI) {
           }
           // Fallback: try adb emu command
           try {
-            const emuResult = await pi.exec("adb", ["-s", serial, "emu", "avd", "name"]);
+            const emuResult = await pi.exec("adb", ["-s", serial, "emu", "avd", "name"], { timeout: 2000 });
             const avdName = emuResult.stdout
               .trim()
               .replace(/^OK\s*\n?/i, "")
@@ -287,7 +297,7 @@ export default function (pi: ExtensionAPI) {
    */
   async function isAdbDeviceConnected(serial: string): Promise<boolean> {
     try {
-      const adbResult = await pi.exec("adb", ["devices"]);
+      const adbResult = await pi.exec("adb", ["devices"], { timeout: 5000 });
       for (const line of adbResult.stdout.split("\n")) {
         const parts = line.trim().split(/\s+/);
         if (parts[0] === serial && parts[1] === "device") {
@@ -326,6 +336,42 @@ export default function (pi: ExtensionAPI) {
     } catch {
       return { available: true };
     }
+  }
+
+  function getPackageName(cwd: string): string | null {
+    try {
+      const project = resolveProject(cwd);
+      // Try manifest first (older Flutter projects)
+      const manifestPath = join(project.path, "android", "app", "src", "main", "AndroidManifest.xml");
+      if (existsSync(manifestPath)) {
+        const manifest = readFileSync(manifestPath, "utf-8");
+        const pkgMatch = manifest.match(/package="([^"]+)"/);
+        if (pkgMatch) return pkgMatch[1];
+      }
+
+      // Try build.gradle.kts (modern Flutter / Kotlin DSL)
+      const gradleKtsPath = join(project.path, "android", "app", "build.gradle.kts");
+      if (existsSync(gradleKtsPath)) {
+        const gradleKts = readFileSync(gradleKtsPath, "utf-8");
+        const appIdMatch = gradleKts.match(/applicationId\s*=\s*["']([^"']+)["']/);
+        const namespaceMatch = gradleKts.match(/namespace\s*=\s*["']([^"']+)["']/);
+        const name = appIdMatch?.[1] || namespaceMatch?.[1];
+        if (name) return name;
+      }
+
+      // Try build.gradle (Groovy DSL)
+      const gradlePath = join(project.path, "android", "app", "build.gradle");
+      if (existsSync(gradlePath)) {
+        const gradle = readFileSync(gradlePath, "utf-8");
+        const appIdMatch = gradle.match(/applicationId\s+["']?([^"'\n]+)["']?/);
+        const namespaceMatch = gradle.match(/namespace\s+["']?([^"'\n]+)["']?/);
+        const name = appIdMatch?.[1] || namespaceMatch?.[1];
+        if (name) return name;
+      }
+    } catch {
+      /* ignore */
+    }
+    return null;
   }
 
   // ── Slash commands (user-facing) ────────────────────────────────────
@@ -380,7 +426,9 @@ export default function (pi: ExtensionAPI) {
         if (connected) {
           let avdName: string | undefined;
           try {
-            const avdResult = await pi.exec("adb", ["-s", targetId, "shell", "getprop", "ro.kernel.qemu.avd_name"]);
+            const avdResult = await pi.exec("adb", ["-s", targetId, "shell", "getprop", "ro.kernel.qemu.avd_name"], {
+              timeout: 2000,
+            });
             avdName = avdResult.stdout.trim() || undefined;
           } catch {
             /* couldn't read AVD name */
@@ -417,7 +465,7 @@ export default function (pi: ExtensionAPI) {
         }
 
         ctx.ui.notify(`Launching emulator ${avdName}...`, "info");
-        const result = await pi.exec("flutter", ["emulators", "--launch", avdName]);
+        const result = await pi.exec("flutter", ["emulators", "--launch", avdName], { timeout: 60000 });
         if (result.code !== 0) {
           const msg = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
           ctx.ui.notify(`Failed to launch: ${msg}`, "error");
@@ -428,7 +476,9 @@ export default function (pi: ExtensionAPI) {
           // Find the specific AVD we launched (not just any emulator)
           const running = await findRunningEmulator(avdName);
           if (running) {
-            const booted = await pi.exec("adb", ["-s", running.serial, "shell", "getprop", "sys.boot_completed"]);
+            const booted = await pi.exec("adb", ["-s", running.serial, "shell", "getprop", "sys.boot_completed"], {
+              timeout: 5000,
+            });
             if (booted.stdout.trim() === "1") {
               savedDevice = { id: running.serial, type: "emulator", name: running.avdName };
               launchedEmulator = running.serial;
@@ -442,7 +492,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      const result = await pi.exec("adb", ["connect", targetId]);
+      const result = await pi.exec("adb", ["connect", targetId], { timeout: 10000 });
       if (result.code !== 0 || result.stdout.includes("failed")) {
         ctx.ui.notify(`Connection failed: ${result.stdout}`, "error");
         return;
@@ -462,11 +512,19 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (launchedEmulator) {
-        await pi.exec("adb", ["-s", launchedEmulator, "emu", "kill"]);
+        try {
+          await pi.exec("adb", ["-s", launchedEmulator, "emu", "kill"], { timeout: 5000 });
+        } catch {
+          /* ignore error */
+        }
         ctx.ui.notify(`Killed emulator ${launchedEmulator}`, "info");
         launchedEmulator = null;
       } else if (savedDevice.type === "ip") {
-        await pi.exec("adb", ["disconnect", savedDevice.id]);
+        try {
+          await pi.exec("adb", ["disconnect", savedDevice.id], { timeout: 5000 });
+        } catch {
+          /* ignore error */
+        }
         ctx.ui.notify(`Disconnected ${savedDevice.id}`, "info");
       }
 
@@ -498,7 +556,10 @@ export default function (pi: ExtensionAPI) {
         if (connected) {
           let avdName: string | undefined;
           try {
-            const avdResult = await pi.exec("adb", ["-s", targetId, "shell", "getprop", "ro.kernel.qemu.avd_name"]);
+            const avdResult = await pi.exec("adb", ["-s", targetId, "shell", "getprop", "ro.kernel.qemu.avd_name"], {
+              timeout: 2000,
+              signal,
+            });
             avdName = avdResult.stdout.trim() || undefined;
           } catch {
             /* couldn't read AVD name */
@@ -548,7 +609,7 @@ export default function (pi: ExtensionAPI) {
           }
         }
 
-        const launchResult = await pi.exec("flutter", ["emulators", "--launch", avdName]);
+        const launchResult = await pi.exec("flutter", ["emulators", "--launch", avdName], { timeout: 60000, signal });
         if (launchResult.code !== 0) {
           const output = [launchResult.stdout, launchResult.stderr].filter(Boolean).join("\n");
           let errorMsg = `Failed to launch emulator ${avdName}:\n${output.trim()}`;
@@ -564,7 +625,10 @@ export default function (pi: ExtensionAPI) {
           // Find the specific AVD we launched (not just any emulator)
           const running = await findRunningEmulator(avdName);
           if (running) {
-            const booted = await pi.exec("adb", ["-s", running.serial, "shell", "getprop", "sys.boot_completed"]);
+            const booted = await pi.exec("adb", ["-s", running.serial, "shell", "getprop", "sys.boot_completed"], {
+              timeout: 5000,
+              signal,
+            });
             if (booted.stdout.trim() === "1") {
               savedDevice = { id: running.serial, type: "emulator", name: running.avdName };
               launchedEmulator = running.serial;
@@ -585,7 +649,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       // ── Case 3: IP:port — ADB network device ──────────────────────
-      const result = await pi.exec("adb", ["connect", targetId]);
+      const result = await pi.exec("adb", ["connect", targetId], { timeout: 10000, signal });
       if (result.code !== 0 || result.stdout.includes("failed")) {
         throw new Error(`ADB connection failed:\n${result.stdout}`);
       }
@@ -604,7 +668,7 @@ export default function (pi: ExtensionAPI) {
     description:
       "Disconnect from the current ADB device. Kills launched emulators, disconnects network devices, clears saved preference.",
     parameters: Type.Object({}),
-    async execute(_, __, ___, ____, ctx) {
+    async execute(_, __, signal, ____, ctx) {
       if (!savedDevice) {
         return { content: [{ type: "text", text: "No saved device to disconnect from." }], details: {} };
       }
@@ -613,14 +677,22 @@ export default function (pi: ExtensionAPI) {
       const lines: string[] = [];
 
       if (launchedEmulator) {
-        await pi.exec("adb", ["-s", launchedEmulator, "emu", "kill"]);
-        lines.push(`✅ Killed emulator \`${launchedEmulator}\``);
+        try {
+          await pi.exec("adb", ["-s", launchedEmulator, "emu", "kill"], { timeout: 5000, signal });
+          lines.push(`✅ Killed emulator \`${launchedEmulator}\``);
+        } catch {
+          lines.push(`⚠️ Failed to kill emulator \`${launchedEmulator}\` (already dead or ADB error).`);
+        }
         launchedEmulator = null;
       }
 
       if (device.type === "ip") {
-        await pi.exec("adb", ["disconnect", device.id]);
-        lines.push(`✅ Disconnected \`${device.id}\``);
+        try {
+          await pi.exec("adb", ["disconnect", device.id], { timeout: 5000, signal });
+          lines.push(`✅ Disconnected \`${device.id}\``);
+        } catch {
+          lines.push(`⚠️ Failed to disconnect \`${device.id}\` (ADB error).`);
+        }
       } else if (device.type === "emulator" && !launchedEmulator) {
         lines.push(`ℹ️ Emulator \`${device.id}\` was not launched by this session — left running.`);
       }
@@ -660,7 +732,10 @@ export default function (pi: ExtensionAPI) {
       let useAttach = false;
       if (isAdbDevice) {
         try {
-          const psResult = await pi.exec("adb", ["-s", targetDevice, "shell", "ps", "-A"]);
+          const psResult = await pi.exec("adb", ["-s", targetDevice, "shell", "ps", "-A"], {
+            timeout: 5000,
+            signal,
+          });
           useAttach = psResult.stdout.toLowerCase().includes("flutter");
         } catch {
           /* adb not available */
@@ -678,13 +753,50 @@ export default function (pi: ExtensionAPI) {
       }) as TrackedFlutterProcess;
       flutterProcess = proc;
       let started = false;
+      let buildFailed = false;
       let lastProgressTime = Date.now();
+
+      // Patterns that indicate a build failure (not transient warnings)
+      const BUILD_FAILURE_PATTERNS = [
+        /BUILD FAILED/,
+        /FAILURE: Build failed/,
+        /Execution failed for task/,
+        /Could not resolve all files/,
+        /Could not resolve all dependencies/,
+        /Could not find (?:the )?correct provider/,
+        /Unsupported class file major version/,
+        /A problem occurred configuring/,
+        /A problem occurred evaluating/,
+        /Could not get unknown property/,
+        /Compilation failed/,
+        /compileDebugKotlin FAILED/,
+        /compileDebugJavaWithJavac FAILED/,
+      ];
 
       proc.stdout?.on("data", (data: Buffer) => {
         if (activeSessionId !== currentSessionId || proc !== flutterProcess) return;
         const str = data.toString();
         flutterOutput += str;
         if (flutterOutput.length > 200_000) flutterOutput = flutterOutput.slice(-100_000);
+
+        // Detect build failures before the app starts
+        if (!started && !buildFailed) {
+          for (const pattern of BUILD_FAILURE_PATTERNS) {
+            if (pattern.test(str)) {
+              buildFailed = true;
+              pi.sendMessage(
+                {
+                  customType: "run_failed",
+                  content: `❌ Flutter build failed\n\n${flutterOutput.slice(-4000)}`,
+                  display: true,
+                  details: { exitCode: 1, started: false, logs: flutterOutput.slice(-2000), stage: "build" },
+                },
+                { deliverAs: "followUp", triggerTurn: true },
+              );
+              break;
+            }
+          }
+        }
 
         if (!started) {
           const match = str.match(
@@ -705,7 +817,7 @@ export default function (pi: ExtensionAPI) {
           }
         }
 
-        if (!started) {
+        if (!started && !buildFailed) {
           const now = Date.now();
           if (now - lastProgressTime >= 10_000) {
             lastProgressTime = now;
@@ -733,22 +845,26 @@ export default function (pi: ExtensionAPI) {
         if (activeSessionId !== currentSessionId || proc !== flutterProcess) return;
         flutterProcess = null;
         if (!started) {
-          pi.sendMessage(
-            {
-              customType: "run_failed",
-              content: `❌ Flutter run exited before app started (code ${code}).\n\n${flutterOutput.slice(-4000)}`,
-              display: true,
-              details: { exitCode: code, started: false },
-            },
-            { deliverAs: "followUp", triggerTurn: true },
-          );
+          // Don't send another run_failed if we already sent one for build failure
+          if (!buildFailed) {
+            pi.sendMessage(
+              {
+                customType: "run_failed",
+                content: `❌ Flutter run exited before app started (code ${code}).\n\n${flutterOutput.slice(-4000)}`,
+                display: true,
+                details: { exitCode: code, started: false, logs: flutterOutput.slice(-1000) },
+              },
+              { deliverAs: "followUp", triggerTurn: true },
+            );
+          }
         } else {
+          const isCrash = code !== 0 && code !== null;
           pi.sendMessage(
             {
               customType: "run_stopped",
-              content: `Flutter app stopped (exit code ${code}).`,
+              content: `${isCrash ? "❌" : "⏹️"} Flutter app stopped (exit code ${code}).${isCrash ? `\n\nLast logs:\n${flutterOutput.slice(-500)}` : ""}`,
               display: true,
-              details: { exitCode: code, started: true },
+              details: { exitCode: code, started: true, logs: flutterOutput.slice(-1000) },
             },
             { deliverAs: "followUp", triggerTurn: true },
           );
@@ -877,7 +993,7 @@ setTimeout(() => { console.error('Timeout'); process.exit(1); }, 15000);
     mkdirSync(join(cwd, `.pi`), { recursive: true });
     writeFileSync(tempFile, script);
     try {
-      const result = await pi.exec("node", [tempFile]);
+      const result = await pi.exec("node", [tempFile], { timeout: 20000 });
       if (result.code !== 0) {
         const output = [result.stdout, result.stderr].filter(Boolean).join("\n");
         throw new Error(`VM call failed (exit ${result.code}):\n${output.trim()}`);
@@ -887,7 +1003,11 @@ setTimeout(() => { console.error('Timeout'); process.exit(1); }, 15000);
         details: { code: result.code },
       };
     } finally {
-      unlinkSync(tempFile);
+      try {
+        unlinkSync(tempFile);
+      } catch {
+        /* ignore */
+      }
     }
   }
 
@@ -978,7 +1098,7 @@ setTimeout(() => { console.error('Timeout'); process.exit(1); }, 15000);
 
       // Default: compact semantics labels via maestro hierarchy
       // Note: maestro hierarchy auto-detects the connected ADB device; --device is not supported
-      const result = await pi.exec("maestro", ["hierarchy"]);
+      const result = await pi.exec("maestro", ["hierarchy"], { timeout: 30000, signal });
       if (result.code !== 0) {
         throw new Error(`maestro hierarchy failed (exit ${result.code}):\n${result.stdout}`);
       }
@@ -1092,8 +1212,16 @@ setTimeout(() => { console.error('Timeout'); process.exit(1); }, 15000);
     name: "flutter_screenshot",
     label: "Flutter Screenshot",
     description: "Take a screenshot of the current device screen. Returns the image path.",
-    parameters: Type.Object({}),
-    async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
+    parameters: Type.Object({
+      timeoutMs: Type.Optional(
+        Type.Number({
+          description:
+            "Maximum time in milliseconds to wait for the screenshot. Default 10000. Increase for remote devices over slow links.",
+        }),
+      ),
+    }),
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      const screenshotTimeout = params.timeoutMs || 10000;
       const tmpDir = join(ctx.cwd, ".pi", "tmp");
       mkdirSync(tmpDir, { recursive: true });
       const filename = `screenshot_${Date.now()}.png`;
@@ -1109,6 +1237,11 @@ setTimeout(() => { console.error('Timeout'); process.exit(1); }, 15000);
         const chunks: Buffer[] = [];
         let stderr = "";
 
+        const timeout = setTimeout(() => {
+          proc.kill();
+          reject(new Error(`Screenshot timed out after ${Math.round(screenshotTimeout / 1000)} seconds.`));
+        }, screenshotTimeout);
+
         proc.stdout.on("data", (chunk) => {
           chunks.push(chunk);
         });
@@ -1118,6 +1251,7 @@ setTimeout(() => { console.error('Timeout'); process.exit(1); }, 15000);
         });
 
         proc.on("close", (code) => {
+          clearTimeout(timeout);
           if (code !== 0) {
             reject(new Error(`Screenshot failed (exit ${code}):\n${stderr}`));
             return;
@@ -1144,11 +1278,13 @@ setTimeout(() => { console.error('Timeout'); process.exit(1); }, 15000);
         });
 
         proc.on("error", (err) => {
+          clearTimeout(timeout);
           reject(err);
         });
 
         if (signal) {
           signal.addEventListener("abort", () => {
+            clearTimeout(timeout);
             proc.kill();
           });
         }
@@ -1161,8 +1297,8 @@ setTimeout(() => { console.error('Timeout'); process.exit(1); }, 15000);
     label: "Flutter Current Screen",
     description: "Get the current activity/screen visible on the device. Returns a single line with the activity name.",
     parameters: Type.Object({}),
-    async execute() {
-      const result = await pi.exec("adb", ["shell", "dumpsys", "activity", "top"]);
+    async execute(_, __, signal) {
+      const result = await pi.exec("adb", ["shell", "dumpsys", "activity", "top"], { timeout: 10000, signal });
       if (result.code !== 0) {
         throw new Error(`dumpsys activity failed (exit ${result.code}):\n${result.stdout}`);
       }
@@ -1181,9 +1317,34 @@ setTimeout(() => { console.error('Timeout'); process.exit(1); }, 15000);
   pi.registerTool({
     name: "flutter_app_status",
     label: "Flutter App Status",
-    description: "Check if the Flutter app is running, stopped, or crashed on the device. Returns compact status info.",
-    parameters: Type.Object({}),
-    async execute(_, __, ___, ____, ctx) {
+    description:
+      "Check if the Flutter app is running, stopped, or crashed on the device. Returns compact status info with death reason when possible (crash, OOM kill, or normal exit).",
+    parameters: Type.Object({
+      timeoutMs: Type.Optional(
+        Type.Number({
+          description:
+            "Maximum time in milliseconds to spend checking status across all checks. Default 30000. Each pi.exec call gets a proportional share of the remaining budget.",
+        }),
+      ),
+    }),
+    async execute(_, params, signal, ____, ctx) {
+      const totalTimeout = params.timeoutMs || 30000;
+      const startedAt = Date.now();
+      function budget(share: number): number {
+        return Math.max(500, Math.floor((totalTimeout - (Date.now() - startedAt)) * share));
+      }
+
+      // Pre-flight: check if device is connected
+      if (savedDevice) {
+        const connected = await isAdbDeviceConnected(savedDevice.id);
+        if (!connected) {
+          return {
+            content: [{ type: "text" as const, text: `⚠️ Device \`${savedDevice.id}\` is disconnected.` }],
+            details: { running: false as const, connected: false as const },
+          };
+        }
+      }
+
       // Check 1: Is the tracked flutter process still alive with a valid VM Service URL?
       if (flutterProcess && flutterProcess.vmServiceUrl && !flutterProcess.killed) {
         // Verify VM Service is actually reachable (check from host)
@@ -1191,7 +1352,10 @@ setTimeout(() => { console.error('Timeout'); process.exit(1); }, 15000);
           const vmHost = flutterProcess.vmServiceUrl.replace("http://", "").split(":")[0];
           const vmPort = flutterProcess.vmServiceUrl.replace("http://", "").split(":")[1]?.split("/")[0];
           if (vmHost && vmPort) {
-            const pingResult = await pi.exec("curl", ["--max-time", "3", "-s", `http://${vmHost}:${vmPort}/json`]);
+            const pingResult = await pi.exec("curl", ["--max-time", "3", "-s", `http://${vmHost}:${vmPort}/json`], {
+              timeout: budget(0.2),
+              signal,
+            });
             if (pingResult.code === 0 && pingResult.stdout.includes("isolate")) {
               return {
                 content: [
@@ -1212,40 +1376,13 @@ setTimeout(() => { console.error('Timeout'); process.exit(1); }, 15000);
       // Check 2: Is the Flutter app process running on the device?
       // On modern Android (API 30+), ps output shows the app's package name, not "flutter".
       // So we check for the app's own package via pidof.
-      try {
-        const project = resolveProject(ctx.cwd);
-        let packageName: string | null = null;
-
-        // Try manifest first (older Flutter projects)
-        const manifestPath = join(project.path, "android", "app", "src", "main", "AndroidManifest.xml");
-        if (!packageName && existsSync(manifestPath)) {
-          const manifest = readFileSync(manifestPath, "utf-8");
-          const pkgMatch = manifest.match(/package="([^"]+)"/);
-          if (pkgMatch) packageName = pkgMatch[1];
-        }
-
-        // Try build.gradle.kts (modern Flutter / Kotlin DSL)
-        if (!packageName) {
-          const gradleKtsPath = join(project.path, "android", "app", "build.gradle.kts");
-          if (existsSync(gradleKtsPath)) {
-            const gradleKts = readFileSync(gradleKtsPath, "utf-8");
-            const appIdMatch = gradleKts.match(/applicationId\s*=\s*"([^"]+)"/);
-            if (appIdMatch) packageName = appIdMatch[1];
-          }
-        }
-
-        // Try build.gradle (Groovy DSL)
-        if (!packageName) {
-          const gradlePath = join(project.path, "android", "app", "build.gradle");
-          if (existsSync(gradlePath)) {
-            const gradle = readFileSync(gradlePath, "utf-8");
-            const appIdMatch = gradle.match(/applicationId\s+["']?([^"'\n]+)["']?/);
-            if (appIdMatch) packageName = appIdMatch[1];
-          }
-        }
-
-        if (packageName) {
-          const pidResult = await pi.exec("adb", ["shell", "pidof", packageName]);
+      const packageName = getPackageName(ctx.cwd);
+      if (packageName) {
+        try {
+          const pidResult = await pi.exec("adb", ["shell", "pidof", packageName], {
+            timeout: budget(0.15),
+            signal,
+          });
           if (pidResult.stdout.trim()) {
             return {
               content: [
@@ -1257,25 +1394,94 @@ setTimeout(() => { console.error('Timeout'); process.exit(1); }, 15000);
               details: { running: true as const, package: packageName, pid: pidResult.stdout.trim() },
             };
           }
+        } catch {
+          /* pidof failed, likely not running */
         }
-      } catch {
-        /* Could not determine package or adb not available */
       }
 
       // Check 3: Crash log
       try {
-        const crashResult = await pi.exec("adb", ["logcat", "-b", "crash", "-t", "10"]);
+        const crashResult = await pi.exec("adb", ["logcat", "-b", "crash", "-t", "20"], {
+          timeout: budget(0.15),
+          signal,
+        });
         const hasCrash = crashResult.stdout.includes("FATAL") || crashResult.stdout.includes("CRASH");
         if (hasCrash) {
           return {
             content: [
-              { type: "text" as const, text: `❌ App has crashed recently\n\n${crashResult.stdout.slice(-500)}` },
+              {
+                type: "text" as const,
+                text: `❌ App has crashed recently (system crash log)\n\n${crashResult.stdout.slice(-1000)}`,
+              },
             ],
-            details: { running: false as const, crashed: true as const },
+            details: { running: false as const, crashed: true as const, source: "logcat-crash" },
           };
         }
       } catch {
         /* logcat not available */
+      }
+
+      // Check 4: General logcat for recent death of the package — also parse OOM info
+      if (packageName) {
+        try {
+          const deathResult = await pi.exec(
+            "sh",
+            ["-c", `adb logcat -d -t 2000 | grep -E "Process ${packageName}|ActivityTaskManager.*${packageName}"`],
+            { timeout: budget(0.4), signal },
+          );
+          if (deathResult.stdout.trim()) {
+            // Parse the death reason from the "Process ... has died:" line
+            // Format: Process <pkg> (pid <pid>) has died: <reason>
+            // Common reasons:
+            //   fg TOP  — foreground, top activity (crash or user-triggered exit)
+            //   cch+<n> CEM  — cached, killed by LMK (low memory killer / OOM)
+            //   vis  — visible but not top
+            //   svc  — service
+            //   prev — previous process
+            const deathMatch = deathResult.stdout.match(/Process\s+\S+\s+\(pid\s+\d+\)\s+has died:\s+(.+)/);
+            let deathReason = "unknown";
+            let deathCategory: "crash" | "oom" | "normal" = "normal";
+
+            if (deathMatch) {
+              const reason = deathMatch[1].trim();
+              deathReason = reason;
+              if (/cch\+\d+/.test(reason)) {
+                deathCategory = "oom";
+              } else if (/fg\s/.test(reason) || /vis/.test(reason)) {
+                deathCategory = "crash";
+              }
+            }
+
+            const categoryEmoji = deathCategory === "oom" ? "🧠" : deathCategory === "crash" ? "💥" : "";
+            const categoryLabel =
+              deathCategory === "oom"
+                ? " (likely killed by low memory)"
+                : deathCategory === "crash"
+                  ? " (died in foreground — likely crashed)"
+                  : "";
+
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text:
+                    `⏹️ Flutter app is not running.${categoryEmoji}${categoryLabel}\n\n` +
+                    `Death reason: \`${deathReason}\`\n\n` +
+                    `Recent logs for \`${packageName}\`:\n\n${deathResult.stdout.slice(-1000)}`,
+                },
+              ],
+              details: {
+                running: false as const,
+                package: packageName,
+                deathReason,
+                deathCategory,
+                recentLogs: deathResult.stdout,
+              },
+            };
+          }
+        } catch {
+          /* ignore */
+        }
       }
 
       return {

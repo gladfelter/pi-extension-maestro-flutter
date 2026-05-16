@@ -99,6 +99,23 @@ class _HomeScreenState extends State<HomeScreen> {
                 label: const Text("Open List Screen"),
               ),
             ),
+            const SizedBox(height: 32),
+            // Crash button — for testing crash detection
+            Semantics(
+              label: "crash-button",
+              child: ElevatedButton.icon(
+                onPressed: () {
+                  // Throw an unhandled exception to simulate a crash
+                  throw Exception('Simulated crash for testing');
+                },
+                icon: const Icon(Icons.error, color: Colors.red),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.red,
+                  foregroundColor: Colors.white,
+                ),
+                label: const Text("CRASH (for testing)"),
+              ),
+            ),
           ],
         ),
       ),
