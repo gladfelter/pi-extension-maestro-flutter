@@ -108,15 +108,15 @@ The emulator window appears via WSLg automatically (no X server config needed).
 
 Each screen and widget exposes a specific contract that the extension (Flutter VM calls or Maestro) depends on.
 
-| Screen | Widget | Semantics label | Contract |
-|--------|--------|----------------|----------|
+| Screen | Widget | Semantics label / ID | Contract |
+|--------|--------|--------------------|----------|
 | Home | Counter text | `counter-display` | Text readout, changes on tap |
 | Home | Increment button | `increment-button` | `tapOn` via Maestro |
 | Home | Decrement button | `decrement-button` | `tapOn` via Maestro |
 | Home | Nav button | `nav-to-form` | Navigation push, hierarchy change |
 | Home | Nav button | `nav-to-list` | Navigation push, hierarchy change |
-| Form | Name field | `name-field` | `inputText` via Maestro |
-| Form | Email field | `email-field` | `inputText`, keyboard type |
+| Form | Name field | `name-field` (ID) | `inputText` via Maestro |
+| Form | Email field | `email-field` (ID) | `inputText`, keyboard type |
 | Form | Submit button | `submit-button` | `tapOn`, triggers state change |
 | Form | Result text | `result-text` | Text readout after submit |
 | List | 100 list items | `list-item-0` … `list-item-99` | Scroll, tap, hierarchy depth |
@@ -126,13 +126,13 @@ Each screen and widget exposes a specific contract that the extension (Flutter V
 **Flutter VM Service (WebSocket)**
 - `ext.flutter.debugDumpApp` — full widget tree; returns `{type: "Extension", method: "...", data: "<tree string>"}`
 - `ext.flutter.debugDumpFocusTree` — focus tree; same response format
-- **Verified 2026-05-13**: All 10 Semantics labels visible in widget tree on API 34 emulator
+- **Verified 2026-05-16**: All 10 Semantics labels/identifiers visible in widget tree on API 34 emulator. Note: TextFields require `Semantics(identifier:)` to be discoverable by Maestro.
 
 **Maestro CLI**
 - `maestro hierarchy` — returns accessibility tree; depends on `Semantics` widgets
 - `maestro test <flow.yaml>` — runs YAML flow; depends on `appId`, tap targets
 - Single actions via temp YAML files — `tapOn`, `inputText`, `scroll`
-- **Verified 2026-05-13**: Hierarchy shows all 10 labels; taps succeed. `assertVisible` can fail on emulator due to Maestro driver connection timeouts — this is a Maestro/emulator limitation, not a contract issue.
+- **Verified 2026-05-16**: Hierarchy shows all 10 labels; taps succeed. TextFields must be targeted using the `id:` selector in Maestro flows to match the `Semantics.identifier`. `assertVisible` can fail on emulator due to Maestro driver connection timeouts — this is a Maestro/emulator limitation, not a contract issue.
 
 **Flutter CLI**
 - `flutter build <target>` — apk, ios, bundle (used by `flutter_build`)

@@ -205,7 +205,7 @@ maestro test .pi/tmp/maestro-tap-login.yaml
 
 **Always use the tool**: `flutter_inspect_tree()` or `flutter_inspect_tree(search: "button")`
 
-If the tree output shows `⚠️ hint-only` warnings or `undefined` widgets, or Maestro can't find elements you know exist, consult **[accessibility-fixes.md](./references/accessibility-fixes.md)** for common Flutter semantics→Maestro mismatches and their fixes.
+If the tree output shows `⚠️ hint-only` warnings or `undefined` widgets, or Maestro can't find elements you know exist, consult **[accessibility-fixes.md](references/accessibility-fixes.md)** for common Flutter semantics→Maestro mismatches and their fixes.
 
 ### "Which screen is currently visible?"
 
@@ -235,7 +235,7 @@ CLI fallback: `adb exec-out screencap -p > /tmp/screen.png`
 
 ## Accessibility Tree Issues
 
-When `flutter_inspect_tree()` reports `⚠️ hint-only` warnings, `undefined` widgets, or Maestro `tapOn` can't find an element that's clearly on screen, see the reference doc: **[accessibility-fixes.md](./references/accessibility-fixes.md)**. It catalogs common Flutter semantics→Maestro mismatches with before/after code examples and the Maestro selector changes needed.
+When `flutter_inspect_tree()` reports `⚠️ hint-only` warnings, `undefined` widgets, or Maestro `tapOn` can't find an element that's clearly on screen, see the reference doc: **[accessibility-fixes.md](references/accessibility-fixes.md)**. It catalogs common Flutter semantics→Maestro mismatches with before/after code examples and the Maestro selector changes needed.
 
 ## Non-Obvious Tips
 
