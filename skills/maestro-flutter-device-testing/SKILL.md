@@ -1,6 +1,6 @@
 ---
    name: maestro-flutter-device-testing
-   description: Flutter development — Extension tools and CLI commands, emulator/device management, building APKs, reading logs, debugging crashes, Maestro UI testing, and raw VM Service access. Use for building, starting, reloading, and restarting Flutter or Dart projects on a device or emulator and inspecting, taking screenshots, debugging and driving the app. Covers adb, flutter and maestro.
+   description: Flutter development — Extension tools and CLI commands, emulator/device management, building APKs, reading logs, debugging crashes, Maestro UI testing, and raw VM Service access. Use for building, starting, reloading, and restarting Flutter or Dart projects on a device or emulator and inspecting the widget tree, debugging and driving the app. Covers adb, flutter and maestro.
 ---
 
 # Flutter CLI Reference
@@ -15,12 +15,12 @@ The extension provides stateful tools that track device connections, VM Service 
 | ------------------------------ | -------------------------------------- | ---------------------------------------------------- |
 | **Connect to device/emulator** | `flutter_connect(id: "emulator-5554")` | Saves device preference; required before running     |
 | **Disconnect**                 | `flutter_disconnect()`                 | Cleans up emulator/network device                    |
-| **Launch the app**             | `flutter_run()`                        | Tracks VM Service URL, process handle, log stream    |
+| **Launch the app**             | `flutter_run()`                        | Fire-and-forget — go idle, follow-up wakes you       |
 | **Stop the app**               | `flutter_stop()`                       | Cleans up tracked state                              |
 | **Hot reload**                 | `flutter_hot_reload()`                 | Sends `r` to running flutter process                 |
 | **Hot restart**                | `flutter_hot_restart()`                | Sends `R`; recovers VM Service URL                   |
 | **Widget tree**                | `flutter_inspect_tree(flat: true)`     | Compact label list; use `search: "button"` to filter |
-| **Screenshot**                 | `flutter_screenshot()`                 | Returns image path + attachment                      |
+| **Screenshot**                 | `flutter_screenshot()`                 | Returns image path only (agent cannot view images)   |
 | **Current screen**             | `flutter_current_screen()`             | Returns visible activity name                        |
 | **App status**                 | `flutter_app_status()`                 | Running / stopped / crashed                          |
 
@@ -42,9 +42,13 @@ The extension provides stateful tools that track device connections, VM Service 
 2. **Launch emulator if needed**: CLI only — see below
 3. **Connect**: `flutter_connect(id: "emulator-5554")` — **ALWAYS use the tool**
 4. **Run app**: `flutter_run()` — **ALWAYS use the tool** (not `flutter run`)
-5. **Take screenshot**: `flutter_screenshot()` — verify the app launched
-6. **Inspect**: `flutter_inspect_tree(flat: true)` — verify semantics labels
-7. **Interact**: Hot reload/restart via `flutter_hot_reload()` / `flutter_hot_restart()`
+5. **END YOUR TURN** — `flutter_run()` returns immediately while the app builds in the background. Do NOT call any further tools (no polling with `flutter_app_status`, `flutter_inspect_tree`, etc). Just end your response without invoking a tool call — that's how the agent yields and waits. The extension will send you a follow-up message when the app is ready (or if it failed).
+
+### After the app is ready (you'll be woken by a follow-up message)
+
+- **Inspect**: `flutter_inspect_tree(flat: true)` — verify semantics labels and screen content
+- **Check activity**: `flutter_current_screen()` — confirm which screen is visible
+- **Interact**: Hot reload/restart via `flutter_hot_reload()` / `flutter_hot_restart()`
 
 ## Device & Emulator Management (CLI — pre-connect only)
 
@@ -213,9 +217,9 @@ flutter pub get
 flutter build apk --debug
 ```
 
-### "Take a screenshot and inspect it"
+### "Take a screenshot (for human review or CI artifact)"
 
-**Always use the tool**: `flutter_screenshot()` — returns image + path.
+**Use the tool**: `flutter_screenshot()` — returns a file path. The agent cannot view or interpret the image content. Use `flutter_inspect_tree()` and `flutter_current_screen()` to programmatically verify UI state.
 
 CLI fallback: `adb exec-out screencap -p > /tmp/screen.png`
 
@@ -227,3 +231,4 @@ CLI fallback: `adb exec-out screencap -p > /tmp/screen.png`
 - **Maestro on emulator**: `assertVisible` can fail due to driver timeouts — this is a Maestro limitation, retry if needed.
 - **Multiple Flutter projects in workspace**: Use `/flutter-project <name>` to select the target project.
 - **Never run `flutter run` from CLI**: The `flutter_run()` tool wraps it and tracks the VM Service URL, process handle, and device state. Running CLI directly means the extension loses track of the running app.
+- **`flutter_run()` is fire-and-forget**: It returns immediately. The app builds in the background. The extension will send a follow-up message when it's ready or if it crashed. After calling `flutter_run()`, end your turn without invoking any further tool calls — that yields control and lets the follow-up message resume you. Progress updates arrive as steer messages (informational, don't act on them).

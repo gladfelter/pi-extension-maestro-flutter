@@ -196,17 +196,11 @@ export default function (pi: ExtensionAPI) {
     }
     // Re-detect running emulator after reload
     if (savedDevice?.type === "emulator") {
-      try {
-        const adbResult = await pi.exec("adb", ["devices"]);
-        for (const line of adbResult.stdout.split("\n")) {
-          if (line.startsWith("emulator-") && line.includes("device")) {
-            const serial = line.split(/\s+/)[0];
-            launchedEmulator = serial;
-            break;
-          }
-        }
-      } catch {
-        /* adb not available */
+      const running = await findRunningEmulator(savedDevice.name || "");
+      if (running) {
+        launchedEmulator = running.serial;
+        // Update savedDevice in case serial changed (e.g., emulator restarted on different port)
+        savedDevice = { id: running.serial, type: "emulator", name: running.avdName };
       }
     }
   });
@@ -227,6 +221,82 @@ export default function (pi: ExtensionAPI) {
       await pi.exec("adb", ["disconnect", savedDevice.id]);
     }
   });
+
+  // ── Running emulator detection ─────────────────────────────────────
+
+  /**
+   * Get all running emulators from ADB, mapping serial → AVD name.
+   * Uses `adb shell getprop ro.kernel.qemu.avd_name` which is available
+   * on all modern emulator images (API 21+).
+   */
+  async function getRunningEmulators(): Promise<Array<{ serial: string; avdName: string }>> {
+    const emulators: Array<{ serial: string; avdName: string }> = [];
+    try {
+      const adbResult = await pi.exec("adb", ["devices"]);
+      for (const line of adbResult.stdout.split("\n")) {
+        const parts = line.trim().split(/\s+/);
+        if (parts[0]?.startsWith("emulator-") && parts[1] === "device") {
+          const serial = parts[0];
+          // Get the AVD name via system property
+          try {
+            const avdResult = await pi.exec("adb", ["-s", serial, "shell", "getprop", "ro.kernel.qemu.avd_name"]);
+            const avdName = avdResult.stdout.trim();
+            if (avdName) {
+              emulators.push({ serial, avdName });
+              continue;
+            }
+          } catch {
+            /* getprop not available on this device */
+          }
+          // Fallback: try adb emu command
+          try {
+            const emuResult = await pi.exec("adb", ["-s", serial, "emu", "avd", "name"]);
+            const avdName = emuResult.stdout
+              .trim()
+              .replace(/^OK\s*\n?/i, "")
+              .trim();
+            if (avdName) {
+              emulators.push({ serial, avdName });
+              continue;
+            }
+          } catch {
+            /* emu command not available */
+          }
+          // Last resort: just include the serial with empty AVD name
+          emulators.push({ serial, avdName: "" });
+        }
+      }
+    } catch {
+      /* adb not available */
+    }
+    return emulators;
+  }
+
+  /**
+   * Find a running emulator by AVD name. Returns null if not found.
+   */
+  async function findRunningEmulator(avdName: string): Promise<{ serial: string; avdName: string } | null> {
+    const emulators = await getRunningEmulators();
+    return emulators.find((e) => e.avdName === avdName) || null;
+  }
+
+  /**
+   * Verify a device serial is connected via ADB.
+   */
+  async function isAdbDeviceConnected(serial: string): Promise<boolean> {
+    try {
+      const adbResult = await pi.exec("adb", ["devices"]);
+      for (const line of adbResult.stdout.split("\n")) {
+        const parts = line.trim().split(/\s+/);
+        if (parts[0] === serial && parts[1] === "device") {
+          return true;
+        }
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
 
   // ── KVM pre-flight check ────────────────────────────────────────────
   async function checkKvm(): Promise<{ available: boolean; hint?: string }> {
@@ -302,8 +372,40 @@ export default function (pi: ExtensionAPI) {
 
       const targetId = args.trim();
 
+      // Handle emulator-XXXX serial directly
+      if (targetId.startsWith("emulator-") && !targetId.startsWith("emulator-avd:")) {
+        const connected = await isAdbDeviceConnected(targetId);
+        if (connected) {
+          let avdName: string | undefined;
+          try {
+            const avdResult = await pi.exec("adb", ["-s", targetId, "shell", "getprop", "ro.kernel.qemu.avd_name"]);
+            avdName = avdResult.stdout.trim() || undefined;
+          } catch {
+            /* couldn't read AVD name */
+          }
+          savedDevice = { id: targetId, type: "emulator", name: avdName };
+          saveDeviceConfig(ctx.cwd, savedDevice);
+          ctx.ui.notify(`✅ Emulator already connected: ${targetId}${avdName ? ` (${avdName})` : ""}`, "info");
+          return;
+        }
+        ctx.ui.notify(`Emulator ${targetId} is not connected. Check with: adb devices`, "error");
+        return;
+      }
+
+      // AVD name or emulator-avd:<name>
       if (targetId.startsWith("emulator-avd:") || !targetId.includes(":")) {
         const avdName = targetId.startsWith("emulator-avd:") ? targetId.replace("emulator-avd:", "") : targetId;
+
+        // Check if this AVD is already running
+        const alreadyRunning = await findRunningEmulator(avdName);
+        if (alreadyRunning) {
+          savedDevice = { id: alreadyRunning.serial, type: "emulator", name: alreadyRunning.avdName };
+          launchedEmulator = alreadyRunning.serial;
+          saveDeviceConfig(ctx.cwd, savedDevice);
+          ctx.ui.notify(`✅ Emulator already running: ${alreadyRunning.serial} (${alreadyRunning.avdName})`, "info");
+          return;
+        }
+
         if (process.platform === "linux") {
           const kvm = await checkKvm();
           if (!kvm.available) {
@@ -321,18 +423,16 @@ export default function (pi: ExtensionAPI) {
         }
         for (let i = 0; i < 60; i++) {
           await new Promise((r) => setTimeout(r, 2000));
-          const check = await pi.exec("adb", ["devices"]);
-          for (const line of check.stdout.split("\n")) {
-            if (line.startsWith("emulator-") && line.includes("device")) {
-              const serial = line.split(/\s+/)[0];
-              const booted = await pi.exec("adb", ["-s", serial, "shell", "getprop", "sys.boot_completed"]);
-              if (booted.stdout.trim() === "1") {
-                savedDevice = { id: serial, type: "emulator", name: avdName };
-                launchedEmulator = serial;
-                saveDeviceConfig(ctx.cwd, savedDevice);
-                ctx.ui.notify(`✅ Emulator booted: ${serial}`, "info");
-                return;
-              }
+          // Find the specific AVD we launched (not just any emulator)
+          const running = await findRunningEmulator(avdName);
+          if (running) {
+            const booted = await pi.exec("adb", ["-s", running.serial, "shell", "getprop", "sys.boot_completed"]);
+            if (booted.stdout.trim() === "1") {
+              savedDevice = { id: running.serial, type: "emulator", name: running.avdName };
+              launchedEmulator = running.serial;
+              saveDeviceConfig(ctx.cwd, savedDevice);
+              ctx.ui.notify(`✅ Emulator booted: ${running.serial} (${running.avdName})`, "info");
+              return;
             }
           }
         }
@@ -379,32 +479,65 @@ export default function (pi: ExtensionAPI) {
     name: "flutter_connect",
     label: "Flutter Connect",
     description:
-      "Connect to a Flutter/ADB device. For IP:port it runs adb connect. For emulator AVD it launches it. Saves as default device for future sessions.",
+      "Connect to a Flutter/ADB device. For IP:port it runs adb connect. For emulator-avd:<name> it launches or reuses an existing emulator. For emulator-XXXX it connects to an already-running emulator. Saves as default device for future sessions.",
     parameters: Type.Object({
       id: Type.String({
-        description: "Device id (e.g., emulator-5554, 192.168.1.100:5555, or emulator-avd:test_34)",
+        description:
+          "Device id: emulator-avd:<AVD_NAME> to launch/reuse, emulator-5554 to connect to running emulator, or IP:port for network device",
       }),
     }),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const targetId = params.id;
       const cwd = ctx.cwd;
 
+      // ── Case 1: emulator-XXXX serial passed directly ──────────────
+      if (targetId.startsWith("emulator-") && !targetId.startsWith("emulator-avd:")) {
+        const connected = await isAdbDeviceConnected(targetId);
+        if (connected) {
+          let avdName: string | undefined;
+          try {
+            const avdResult = await pi.exec("adb", ["-s", targetId, "shell", "getprop", "ro.kernel.qemu.avd_name"]);
+            avdName = avdResult.stdout.trim() || undefined;
+          } catch {
+            /* couldn't read AVD name */
+          }
+          savedDevice = { id: targetId, type: "emulator", name: avdName };
+          saveDeviceConfig(cwd, savedDevice);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `✅ Emulator already connected: \`${targetId}\`${avdName ? ` (${avdName})` : ""}\nSaved as default device.`,
+              },
+            ],
+            details: { device: targetId, avd: avdName, existing: true },
+          };
+        }
+        throw new Error(`Emulator \`${targetId}\` is not connected via ADB.\nCheck with: adb devices`);
+      }
+
+      // ── Case 2: emulator-avd:<AVD_NAME> — launch or reuse ────────
       if (targetId.startsWith("emulator-avd:")) {
         const avdName = targetId.replace("emulator-avd:", "");
 
-        // Check if already running
-        const adbResult = await pi.exec("adb", ["devices"]);
-        for (const line of adbResult.stdout.split("\n")) {
-          if (line.startsWith("emulator-") && line.includes("device")) {
-            const serial = line.split(/\s+/)[0];
-            savedDevice = { id: serial, type: "emulator", name: avdName };
-            saveDeviceConfig(cwd, savedDevice);
-            return {
-              content: [{ type: "text", text: `Emulator already running: \`${serial}\`\nSaved as default device.` }],
-              details: { device: serial, avd: avdName },
-            };
-          }
+        // Check if this specific AVD is already running
+        const alreadyRunning = await findRunningEmulator(avdName);
+        if (alreadyRunning) {
+          savedDevice = { id: alreadyRunning.serial, type: "emulator", name: alreadyRunning.avdName };
+          saveDeviceConfig(cwd, savedDevice);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `✅ Emulator already running: \`${alreadyRunning.serial}\` (${alreadyRunning.avdName})\nSaved as default device.`,
+              },
+            ],
+            details: { device: alreadyRunning.serial, avd: alreadyRunning.avdName, existing: true },
+          };
         }
+
+        // Collect running emulators for hint on failure
+        const allRunning = await getRunningEmulators();
 
         if (process.platform === "linux") {
           const kvm = await checkKvm();
@@ -416,37 +549,40 @@ export default function (pi: ExtensionAPI) {
         const launchResult = await pi.exec("flutter", ["emulators", "--launch", avdName]);
         if (launchResult.code !== 0) {
           const output = [launchResult.stdout, launchResult.stderr].filter(Boolean).join("\n");
-          throw new Error(`Failed to launch emulator ${avdName}:\n${output.trim()}`);
+          let errorMsg = `Failed to launch emulator ${avdName}:\n${output.trim()}`;
+          if (allRunning.length > 0) {
+            errorMsg += `\n\nNote: These emulators are already running:\n${allRunning.map((e) => `  \`${e.serial}\` ${e.avdName ? `(${e.avdName})` : ""}`).join("\n")}`;
+          }
+          throw new Error(errorMsg);
         }
 
         for (let i = 0; i < 60; i++) {
           if (signal?.aborted) throw new Error("Aborted while waiting for emulator.");
           await new Promise((r) => setTimeout(r, 2000));
-          const check = await pi.exec("adb", ["devices"]);
-          for (const line of check.stdout.split("\n")) {
-            if (line.startsWith("emulator-") && line.includes("device")) {
-              const serial = line.split(/\s+/)[0];
-              const booted = await pi.exec("adb", ["-s", serial, "shell", "getprop", "sys.boot_completed"]);
-              if (booted.stdout.trim() === "1") {
-                savedDevice = { id: serial, type: "emulator", name: avdName };
-                launchedEmulator = serial;
-                saveDeviceConfig(cwd, savedDevice);
-                return {
-                  content: [
-                    {
-                      type: "text",
-                      text: `✅ Emulator launched and booted: \`${serial}\`\nSaved as default device.`,
-                    },
-                  ],
-                  details: { device: serial, avd: avdName },
-                };
-              }
+          // Find the specific AVD we launched (not just any emulator)
+          const running = await findRunningEmulator(avdName);
+          if (running) {
+            const booted = await pi.exec("adb", ["-s", running.serial, "shell", "getprop", "sys.boot_completed"]);
+            if (booted.stdout.trim() === "1") {
+              savedDevice = { id: running.serial, type: "emulator", name: running.avdName };
+              launchedEmulator = running.serial;
+              saveDeviceConfig(cwd, savedDevice);
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: `✅ Emulator launched and booted: \`${running.serial}\` (${running.avdName})\nSaved as default device.`,
+                  },
+                ],
+                details: { device: running.serial, avd: running.avdName },
+              };
             }
           }
         }
         throw new Error(`Emulator ${avdName} did not boot within 2 minutes.`);
       }
 
+      // ── Case 3: IP:port — ADB network device ──────────────────────
       const result = await pi.exec("adb", ["connect", targetId]);
       if (result.code !== 0 || result.stdout.includes("failed")) {
         throw new Error(`ADB connection failed:\n${result.stdout}`);
@@ -621,7 +757,7 @@ export default function (pi: ExtensionAPI) {
         content: [
           {
             type: "text",
-            text: `🚀 Starting app: ${commandLabel}\n\nThis command is **asynchronous** — the app is compiling and launching in the background.\n\n**Do not call other Flutter tools yet.** Wait for the follow-up message that says "✅ Flutter app is running" before proceeding. This typically takes 15-60 seconds for a cold start.\n\nIf you need to check progress, you can call flutter_app_status after ~20 seconds.`,
+            text: `🚀 Starting app: ${commandLabel}\n\nYou may do other work, but do not sleep or wait for this operation. End work if you have no other tasks. You will be notified when the app is running.\n\n`,
           },
         ],
         details: { background: true },
@@ -767,31 +903,43 @@ setTimeout(() => { console.error('Timeout'); process.exit(1); }, 15000);
     }),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       // Full tree via VM service — only when explicitly requested
+      // Truncate to last 50 lines (tail) — the head is Flutter framework plumbing
+      // (MediaQuery, FocusScope, Theme, Navigator) while the tail has actual UI widgets.
       if (params.full) {
-        return callVmService("ext.flutter.debugDumpApp", {}, ctx.cwd);
+        const full = await callVmService("ext.flutter.debugDumpApp", {}, ctx.cwd);
+        const allLines = full.content[0].text.split("\n");
+        const totalLines = allLines.length;
+        const MAX_LINES = 50;
+        if (allLines.length > MAX_LINES) {
+          const tail = allLines.slice(-MAX_LINES).join("\n");
+          full.content[0].text = `... (showing last ${MAX_LINES} of ${totalLines} lines; head is Flutter framework plumbing)\n${tail}`;
+          full.details.totalLines = totalLines;
+        }
+        return full;
       }
 
       // Default: compact semantics labels via maestro hierarchy
-      const maestroArgs: string[] = ["hierarchy"];
-      // Pass device serial if available (adb-connected devices)
-      const deviceSerial = savedDevice?.id || deviceId;
-      if (deviceSerial && (deviceSerial.startsWith("emulator-") || deviceSerial.startsWith("127.0.0.1"))) {
-        maestroArgs.push("--device", deviceSerial);
-      }
-      const result = await pi.exec("maestro", maestroArgs);
+      // Note: maestro hierarchy auto-detects the connected ADB device; --device is not supported
+      const result = await pi.exec("maestro", ["hierarchy"]);
       if (result.code !== 0) {
         throw new Error(`maestro hierarchy failed (exit ${result.code}):\n${result.stdout}`);
       }
 
       let tree: Record<string, unknown>;
       try {
-        tree = JSON.parse(result.stdout) as Record<string, unknown>;
+        // Maestro prefixes output with "Running on <device>\n" before the JSON — strip it
+        const jsonStart = result.stdout.indexOf("{");
+        const jsonStr = jsonStart >= 0 ? result.stdout.slice(jsonStart) : result.stdout;
+        tree = JSON.parse(jsonStr) as Record<string, unknown>;
       } catch {
-        throw new Error("Failed to parse maestro hierarchy JSON.");
+        throw new Error(`Failed to parse maestro hierarchy JSON:\n${result.stdout.slice(0, 500)}`);
       }
 
       // Recursively extract leaf nodes with accessibility text
-      const labels: Array<{ label: string; text?: string; clickable: boolean; bounds: string }> = [];
+      // Also detects TextField semantics issues where Semantics.label ends up in hintText
+      // instead of accessibilityText (a common Flutter+Android accessibility quirk).
+      const labels: Array<{ label: string; text?: string; hintText?: string; clickable: boolean; bounds: string }> = [];
+      const textFieldIssues: Array<{ hintTextLabel: string; bounds: string; className: string }> = [];
       function walk(node: unknown) {
         if (!node || typeof node !== "object" || Array.isArray(node)) return;
         const obj = node as Record<string, unknown>;
@@ -799,11 +947,31 @@ setTimeout(() => { console.error('Timeout'); process.exit(1); }, 15000);
         if (attrs) {
           const accessibilityText = attrs.accessibilityText || "";
           const text = attrs.text || "";
+          const hintText = attrs.hintText || "";
           const clickable = attrs.clickable === "true";
           const bounds = attrs.bounds || "";
-          // Include if it has meaningful text and is a leaf or clickable
-          if ((accessibilityText || text) && (!obj.children || (obj.children as unknown[]).length === 0 || clickable)) {
-            labels.push({ label: accessibilityText, text: text || undefined, clickable, bounds });
+          const className = attrs.class || "";
+          // Include if it has meaningful text/hint and is a leaf or clickable
+          if (
+            (accessibilityText || text || hintText) &&
+            (!obj.children || (obj.children as unknown[]).length === 0 || clickable)
+          ) {
+            labels.push({
+              label: accessibilityText,
+              text: text || undefined,
+              hintText: hintText || undefined,
+              clickable,
+              bounds,
+            });
+          }
+          // Detect TextField semantics issue: label present in hintText but not in accessibilityText
+          // This happens when Semantics(label: "...") wraps a TextField — Android places it in hintText.
+          if (hintText && !accessibilityText && className === "android.widget.EditText") {
+            // Extract the first line of hintText (usually the Semantics label)
+            const firstLine = hintText.split("\n")[0].trim();
+            if (firstLine) {
+              textFieldIssues.push({ hintTextLabel: firstLine, bounds, className });
+            }
           }
         }
         if (Array.isArray(obj.children)) {
@@ -815,22 +983,39 @@ setTimeout(() => { console.error('Timeout'); process.exit(1); }, 15000);
       const searchQuery = params.search?.toLowerCase();
       const filtered = searchQuery
         ? labels.filter(
-            (l) => l.label.toLowerCase().includes(searchQuery) || l.text?.toLowerCase().includes(searchQuery),
+            (l) =>
+              l.label.toLowerCase().includes(searchQuery) ||
+              l.text?.toLowerCase().includes(searchQuery) ||
+              l.hintText?.toLowerCase().includes(searchQuery),
           )
         : labels;
 
       const lines = filtered.map((l) => {
         const click = l.clickable ? "👆" : "";
-        return `${click} \`${l.label || l.text}\` — ${l.bounds}${l.text && l.text !== l.label ? ` [${l.text}]` : ""}`;
+        const hint = l.hintText && !l.label ? ` ⚠️ hint-only: \`${l.hintText.split("\n")[0]}\`` : "";
+        const extra = l.text && l.text !== l.label ? ` [${l.text}]` : "";
+        return `${click} \`${l.label || l.text}\` — ${l.bounds}${extra}${hint}`;
       });
 
       // Hard limit: truncate if output would be too large (>4KB)
       const MAX_OUTPUT_BYTES = 4096;
       const joined = lines.join("\n");
       const truncated = joined.length > MAX_OUTPUT_BYTES;
-      const output = truncated
+      let output = truncated
         ? joined.slice(0, MAX_OUTPUT_BYTES) + "\n... (truncated, use search to find specific labels)"
         : joined;
+
+      // Append TextField semantics warning if detected
+      if (textFieldIssues.length > 0) {
+        const issueLabels = textFieldIssues.map((i) => `  - \`${i.hintTextLabel}\``).join("\n");
+        output += `\n\n⚠️ TextField semantics issue detected (${textFieldIssues.length} field${textFieldIssues.length > 1 ? "s" : ""})\n`;
+        output += `These Semantics labels are in \`hintText\` (not \`accessibilityText\`) and won't be found by maestro tapOn:\n${issueLabels}\n\n`;
+        output += `This is a known Flutter+Android quirk: Semantics(label) wrapping TextField places the label in hintText.\n`;
+        output += `Fix options:\n`;
+        output += `  1. Use Semantics(label: "...", explicitChildNodes: true) to force the label into accessibilityText\n`;
+        output += `  2. Use InputDecoration(semanticLabel: "...") on the TextField directly\n`;
+        output += `  3. Wrap with ExcludeSemantics() + Semantics() to override the TextField's default semantics\n`;
+      }
 
       return {
         content: [
@@ -839,7 +1024,7 @@ setTimeout(() => { console.error('Timeout'); process.exit(1); }, 15000);
             text: output,
           },
         ],
-        details: { count: filtered.length, total: labels.length, truncated },
+        details: { count: filtered.length, total: labels.length, truncated, textFieldIssues: textFieldIssues.length },
       };
     },
   });
