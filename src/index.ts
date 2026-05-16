@@ -621,7 +621,7 @@ export default function (pi: ExtensionAPI) {
         content: [
           {
             type: "text",
-            text: `🚀 Starting app: ${commandLabel}\n\nThe agent will be notified when the app is running.`,
+            text: `🚀 Starting app: ${commandLabel}\n\nThis command is **asynchronous** — the app is compiling and launching in the background.\n\n**Do not call other Flutter tools yet.** Wait for the follow-up message that says "✅ Flutter app is running" before proceeding. This typically takes 15-60 seconds for a cold start.\n\nIf you need to check progress, you can call flutter_app_status after ~20 seconds.`,
           },
         ],
         details: { background: true },
@@ -678,7 +678,7 @@ export default function (pi: ExtensionAPI) {
     method: string,
     callParams: Record<string, unknown> = {},
     cwd: string,
-  ): Promise<{ content: Array<{ type: string; text: string }>; details: Record<string, unknown> }> {
+  ): Promise<{ content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> }> {
     if (!flutterProcess?.vmServiceUrl) {
       throw new Error("VM Service URL not found. Is the app running?");
     }
@@ -755,78 +755,92 @@ setTimeout(() => { console.error('Timeout'); process.exit(1); }, 15000);
     name: "flutter_inspect_tree",
     label: "Flutter Inspect Tree",
     description:
-      "Inspect Flutter widget tree. Default: full tree dump. Use flat=true for compact list of semantics labels. Use search to filter by label text.",
+      "Inspect Flutter widget tree. Default: compact list of semantics labels (safe for context). Use search to filter by label text. Use full=true for raw VM service tree dump (very large, use only when needed).",
     parameters: Type.Object({
-      flat: Type.Optional(
-        Type.Boolean({ description: "Return flat list of semantics labels with bounds instead of full tree" }),
-      ),
       search: Type.Optional(Type.String({ description: "Filter to widgets whose semantics label contains this text" })),
+      full: Type.Optional(
+        Type.Boolean({
+          description:
+            "Get the raw VM service widget tree dump. WARNING: this produces kilobytes of output. Only use when you need internal Flutter widget details, not for finding labels or testing.",
+        }),
+      ),
     }),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      if (params.flat || params.search) {
-        // Use maestro hierarchy (JSON) for filtering
-        const result = await pi.exec("maestro", ["hierarchy"]);
-        if (result.code !== 0) {
-          throw new Error(`maestro hierarchy failed (exit ${result.code}):\n${result.stdout}`);
-        }
-
-        let tree: Record<string, unknown>;
-        try {
-          tree = JSON.parse(result.stdout) as Record<string, unknown>;
-        } catch {
-          throw new Error("Failed to parse maestro hierarchy JSON.");
-        }
-
-        // Recursively extract leaf nodes with accessibility text
-        const labels: Array<{ label: string; text?: string; clickable: boolean; bounds: string }> = [];
-        function walk(node: unknown) {
-          if (!node || typeof node !== "object" || Array.isArray(node)) return;
-          const obj = node as Record<string, unknown>;
-          const attrs = obj.attributes as Record<string, string> | undefined;
-          if (attrs) {
-            const accessibilityText = attrs.accessibilityText || "";
-            const text = attrs.text || "";
-            const clickable = attrs.clickable === "true";
-            const bounds = attrs.bounds || "";
-            // Include if it has meaningful text and is a leaf or clickable
-            if (
-              (accessibilityText || text) &&
-              (!obj.children || (obj.children as unknown[]).length === 0 || clickable)
-            ) {
-              labels.push({ label: accessibilityText, text: text || undefined, clickable, bounds });
-            }
-          }
-          if (Array.isArray(obj.children)) {
-            for (const child of obj.children) walk(child);
-          }
-        }
-        walk(tree);
-
-        const searchQuery = params.search?.toLowerCase();
-        const filtered = searchQuery
-          ? labels.filter(
-              (l) => l.label.toLowerCase().includes(searchQuery) || l.text?.toLowerCase().includes(searchQuery),
-            )
-          : labels;
-
-        const lines = filtered.map((l) => {
-          const click = l.clickable ? "👆" : "";
-          return `${click} \`${l.label || l.text}\` — ${l.bounds}${l.text && l.text !== l.label ? ` [${l.text}]` : ""}`;
-        });
-
-        return {
-          content: [
-            {
-              type: "text",
-              text: lines.length ? lines.join("\n") : `No matching semantics labels found. (total: ${labels.length})`,
-            },
-          ],
-          details: { count: filtered.length, total: labels.length },
-        };
+      // Full tree via VM service — only when explicitly requested
+      if (params.full) {
+        return callVmService("ext.flutter.debugDumpApp", {}, ctx.cwd);
       }
 
-      // Full tree via VM service
-      return callVmService("ext.flutter.debugDumpApp", {}, ctx.cwd);
+      // Default: compact semantics labels via maestro hierarchy
+      const maestroArgs: string[] = ["hierarchy"];
+      // Pass device serial if available (adb-connected devices)
+      const deviceSerial = savedDevice?.id || deviceId;
+      if (deviceSerial && (deviceSerial.startsWith("emulator-") || deviceSerial.startsWith("127.0.0.1"))) {
+        maestroArgs.push("--device", deviceSerial);
+      }
+      const result = await pi.exec("maestro", maestroArgs);
+      if (result.code !== 0) {
+        throw new Error(`maestro hierarchy failed (exit ${result.code}):\n${result.stdout}`);
+      }
+
+      let tree: Record<string, unknown>;
+      try {
+        tree = JSON.parse(result.stdout) as Record<string, unknown>;
+      } catch {
+        throw new Error("Failed to parse maestro hierarchy JSON.");
+      }
+
+      // Recursively extract leaf nodes with accessibility text
+      const labels: Array<{ label: string; text?: string; clickable: boolean; bounds: string }> = [];
+      function walk(node: unknown) {
+        if (!node || typeof node !== "object" || Array.isArray(node)) return;
+        const obj = node as Record<string, unknown>;
+        const attrs = obj.attributes as Record<string, string> | undefined;
+        if (attrs) {
+          const accessibilityText = attrs.accessibilityText || "";
+          const text = attrs.text || "";
+          const clickable = attrs.clickable === "true";
+          const bounds = attrs.bounds || "";
+          // Include if it has meaningful text and is a leaf or clickable
+          if ((accessibilityText || text) && (!obj.children || (obj.children as unknown[]).length === 0 || clickable)) {
+            labels.push({ label: accessibilityText, text: text || undefined, clickable, bounds });
+          }
+        }
+        if (Array.isArray(obj.children)) {
+          for (const child of obj.children) walk(child);
+        }
+      }
+      walk(tree);
+
+      const searchQuery = params.search?.toLowerCase();
+      const filtered = searchQuery
+        ? labels.filter(
+            (l) => l.label.toLowerCase().includes(searchQuery) || l.text?.toLowerCase().includes(searchQuery),
+          )
+        : labels;
+
+      const lines = filtered.map((l) => {
+        const click = l.clickable ? "👆" : "";
+        return `${click} \`${l.label || l.text}\` — ${l.bounds}${l.text && l.text !== l.label ? ` [${l.text}]` : ""}`;
+      });
+
+      // Hard limit: truncate if output would be too large (>4KB)
+      const MAX_OUTPUT_BYTES = 4096;
+      const joined = lines.join("\n");
+      const truncated = joined.length > MAX_OUTPUT_BYTES;
+      const output = truncated
+        ? joined.slice(0, MAX_OUTPUT_BYTES) + "\n... (truncated, use search to find specific labels)"
+        : joined;
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: output,
+          },
+        ],
+        details: { count: filtered.length, total: labels.length, truncated },
+      };
     },
   });
 
@@ -886,31 +900,76 @@ setTimeout(() => { console.error('Timeout'); process.exit(1); }, 15000);
     label: "Flutter App Status",
     description: "Check if the Flutter app is running, stopped, or crashed on the device. Returns compact status info.",
     parameters: Type.Object({}),
-    async execute() {
-      const psResult = await pi.exec("adb", ["shell", "ps", "-A"]);
-      const flutterLines = psResult.stdout.toLowerCase().includes("flutter")
-        ? psResult.stdout.split("\n").filter((l) => l.toLowerCase().includes("flutter"))
-        : [];
-
-      if (flutterLines.length > 0) {
-        return {
-          content: [
-            { type: "text" as const, text: `✅ Flutter app is running\n\n${flutterLines.slice(0, 3).join("\n")}` },
-          ],
-          details: { running: true as const, processes: flutterLines.length },
-        };
+    async execute(_, __, ___, ____, ctx) {
+      // Check 1: Is the tracked flutter process still alive with a valid VM Service URL?
+      if (flutterProcess && flutterProcess.vmServiceUrl && !flutterProcess.killed) {
+        // Verify VM Service is actually reachable (check from host)
+        try {
+          const vmHost = flutterProcess.vmServiceUrl.replace("http://", "").split(":")[0];
+          const vmPort = flutterProcess.vmServiceUrl.replace("http://", "").split(":")[1]?.split("/")[0];
+          if (vmHost && vmPort) {
+            const pingResult = await pi.exec("curl", ["--max-time", "3", "-s", `http://${vmHost}:${vmPort}/json`]);
+            if (pingResult.code === 0 && pingResult.stdout.includes("isolate")) {
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: `✅ Flutter app is running\n\nVM Service: ${flutterProcess.vmServiceUrl}`,
+                  },
+                ],
+                details: { running: true as const, vmServiceUrl: flutterProcess.vmServiceUrl },
+              };
+            }
+          }
+        } catch {
+          /* VM service unreachable, fall through */
+        }
       }
 
-      const crashResult = await pi.exec("adb", ["logcat", "-b", "crash", "-t", "10"]);
-      const hasCrash = crashResult.stdout.includes("FATAL") || crashResult.stdout.includes("CRASH");
+      // Check 2: Is the Flutter app process running on the device?
+      // On modern Android (API 30+), ps output shows the app's package name, not "flutter".
+      // So we check for the app's own package via pidof.
+      try {
+        const project = resolveProject(ctx.cwd);
+        const manifestPath = join(project.path, "android", "app", "src", "main", "AndroidManifest.xml");
+        let packageName: string | null = null;
+        if (existsSync(manifestPath)) {
+          const manifest = readFileSync(manifestPath, "utf-8");
+          const pkgMatch = manifest.match(/package="([^"]+)"/);
+          if (pkgMatch) packageName = pkgMatch[1];
+        }
+        if (packageName) {
+          const pidResult = await pi.exec("adb", ["shell", "pidof", packageName]);
+          if (pidResult.stdout.trim()) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `✅ Flutter app is running (package: ${packageName})\n\nPID: ${pidResult.stdout.trim()}`,
+                },
+              ],
+              details: { running: true as const, package: packageName, pid: pidResult.stdout.trim() },
+            };
+          }
+        }
+      } catch {
+        /* Could not determine package or adb not available */
+      }
 
-      if (hasCrash) {
-        return {
-          content: [
-            { type: "text" as const, text: `❌ App has crashed recently\n\n${crashResult.stdout.slice(-500)}` },
-          ],
-          details: { running: false as const, crashed: true as const },
-        };
+      // Check 3: Crash log
+      try {
+        const crashResult = await pi.exec("adb", ["logcat", "-b", "crash", "-t", "10"]);
+        const hasCrash = crashResult.stdout.includes("FATAL") || crashResult.stdout.includes("CRASH");
+        if (hasCrash) {
+          return {
+            content: [
+              { type: "text" as const, text: `❌ App has crashed recently\n\n${crashResult.stdout.slice(-500)}` },
+            ],
+            details: { running: false as const, crashed: true as const },
+          };
+        }
+      } catch {
+        /* logcat not available */
       }
 
       return {

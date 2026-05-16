@@ -12,7 +12,7 @@
     "type": "git",
     "url": "git+https://github.com/gladfelter/pi-extension-maestro-flutter.git"
   },
-  "keywords": [],
+  "keywords": ["pi-package"],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
@@ -29,5 +29,9 @@
   },
   "dependencies": {
     "ws": "^8.20.1"
+  },
+  "pi": {
+    "extensions": ["./src/index.ts"],
+    "skills": ["./skills"]
   }
 }
