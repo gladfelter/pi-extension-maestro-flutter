@@ -1,6 +1,6 @@
 ---
    name: maestro-flutter-device-testing
-   description: Flutter development — Extension tools and CLI commands, emulator/device management, building APKs, reading logs, debugging crashes, Maestro UI testing, and raw VM Service access. Use for building, starting, reloading, and restarting Flutter or Dart projects on a device or emulator and inspecting the widget tree, debugging and driving the app. Covers adb, flutter and maestro.
+   description: MANDATORY for Flutter/Maestro development. Contains the stateful workflow for flutter_run, connecting devices, and fixing common Flutter semantics-to-Maestro mismatches. READ THIS before building, starting, or testing the app.
 ---
 
 # Flutter CLI Reference
@@ -19,7 +19,7 @@ The extension provides stateful tools that track device connections, VM Service 
 | **Stop the app**               | `flutter_stop()`                       | Cleans up tracked state                              |
 | **Hot reload**                 | `flutter_hot_reload()`                 | Sends `r` to running flutter process                 |
 | **Hot restart**                | `flutter_hot_restart()`                | Sends `R`; recovers VM Service URL                   |
-| **Widget tree**                | `flutter_inspect_tree(flat: true)`     | Compact label list; use `search: "button"` to filter |
+| **Widget tree**                | `flutter_inspect_tree()`               | Compact label list; use `search: "button"` to filter |
 | **Screenshot**                 | `flutter_screenshot()`                 | Returns image path only (agent cannot view images)   |
 | **Current screen**             | `flutter_current_screen()`             | Returns visible activity name                        |
 | **App status**                 | `flutter_app_status()`                 | Running / stopped / crashed                          |
@@ -46,7 +46,7 @@ The extension provides stateful tools that track device connections, VM Service 
 
 ### After the app is ready (you'll be woken by a follow-up message)
 
-- **Inspect**: `flutter_inspect_tree(flat: true)` — verify semantics labels and screen content
+- **Inspect**: `flutter_inspect_tree()` — verify semantics labels and screen content
 - **Check activity**: `flutter_current_screen()` — confirm which screen is visible
 - **Interact**: Hot reload/restart via `flutter_hot_reload()` / `flutter_hot_restart()`
 
@@ -203,9 +203,9 @@ maestro test .pi/tmp/maestro-tap-login.yaml
 
 ### "Need to find a widget's semantics label"
 
-**Always use the tool**: `flutter_inspect_tree(flat: true)` or `flutter_inspect_tree(search: "button")`
+**Always use the tool**: `flutter_inspect_tree()` or `flutter_inspect_tree(search: "button")`
 
-If the tree output shows `⚠️ hint-only` warnings or `undefined` widgets, or Maestro can't find elements you know exist, consult **[accessibility-fixes.md](references/accessibility-fixes.md)** for common Flutter semantics→Maestro mismatches and their fixes.
+If the tree output shows `⚠️ hint-only` warnings or `undefined` widgets, or Maestro can't find elements you know exist, consult **[accessibility-fixes.md](./references/accessibility-fixes.md)** for common Flutter semantics→Maestro mismatches and their fixes.
 
 ### "Which screen is currently visible?"
 
@@ -235,7 +235,7 @@ CLI fallback: `adb exec-out screencap -p > /tmp/screen.png`
 
 ## Accessibility Tree Issues
 
-When `flutter_inspect_tree()` reports `⚠️ hint-only` warnings, `undefined` widgets, or Maestro `tapOn` can't find an element that's clearly on screen, see the reference doc: **[accessibility-fixes.md](references/accessibility-fixes.md)**. It catalogs common Flutter semantics→Maestro mismatches with before/after code examples and the Maestro selector changes needed.
+When `flutter_inspect_tree()` reports `⚠️ hint-only` warnings, `undefined` widgets, or Maestro `tapOn` can't find an element that's clearly on screen, see the reference doc: **[accessibility-fixes.md](./references/accessibility-fixes.md)**. It catalogs common Flutter semantics→Maestro mismatches with before/after code examples and the Maestro selector changes needed.
 
 ## Non-Obvious Tips
 

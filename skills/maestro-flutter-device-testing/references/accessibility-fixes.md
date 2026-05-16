@@ -113,9 +113,10 @@ If you can't use `Semantics.identifier` (e.g., pre-Flutter 3.19), two other opti
 
 When a Maestro `tapOn` or `assertVisible` can't find an element:
 
-1. **Inspect the semantics tree**: `flutter_inspect_tree(flat: true)`
+1. **Inspect the semantics tree**: `flutter_inspect_tree()`
 2. **Check the warning section** — the tree output flags common issues inline
-3. **If the widget shows `undefined` with `⚠️ hint-only`**: the label is in `hintText` → apply Fix #1 above
+3. **If the widget shows `undefined` with `⚠️ hint-only`**: the label is in `hintText` → apply Fix #1 above.
+    *   *Note*: The `⚠️ hint-only` warning in `flutter_inspect_tree()` might persist even after using `identifier`. Verify the fix by running `maestro hierarchy` and checking for `resource-id`.
 4. **If the widget is completely missing**: it likely has no `Semantics` wrapper → add one with `identifier` or `label`
 5. **For icon-only buttons**: add `semanticLabel` to the `Icon` widget directly:
    ```dart

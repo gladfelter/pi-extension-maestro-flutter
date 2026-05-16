@@ -22,6 +22,19 @@ A `pi.dev` extension for using the Maestro UI Automation system with Flutter for
    ```
    Or add it to your project's `.pi/extensions/` directory.
 
+## Development Workflow (IMPORTANT)
+
+This project uses a specific stateful workflow for managing Flutter and Maestro. 
+
+**Agents and Developers:** Always read the `maestro-flutter-device-testing` skill located at:
+`skills/maestro-flutter-device-testing/SKILL.md`
+
+This skill is **mandatory** for understanding:
+- The required "fire-and-forget" pattern for `flutter_run`.
+- How to handle Flutter VM Service connection state.
+- Fixing common Flutter semantics-to-Maestro mismatches (like `TextField` labeling).
+- Using the correct tool parameters for inspection.
+
 ## Tools
 
 ### Flutter

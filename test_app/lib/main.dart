@@ -140,7 +140,7 @@ class _FormScreenState extends State<FormScreen> {
         child: Column(
           children: [
             Semantics(
-              label: "name-field",
+              identifier: "name-field",
               child: TextField(
                 controller: _nameController,
                 decoration: const InputDecoration(
@@ -151,7 +151,7 @@ class _FormScreenState extends State<FormScreen> {
             ),
             const SizedBox(height: 16),
             Semantics(
-              label: "email-field",
+              identifier: "email-field",
               child: TextField(
                 controller: _emailController,
                 decoration: const InputDecoration(
@@ -163,7 +163,7 @@ class _FormScreenState extends State<FormScreen> {
             ),
             const SizedBox(height: 16),
             Semantics(
-              label: "submit-button",
+              identifier: "submit-button",
               child: ElevatedButton(
                 onPressed: () {
                   setState(() {

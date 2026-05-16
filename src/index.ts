@@ -36,7 +36,6 @@ interface TrackedFlutterProcess extends ChildProcess {
 export default function (pi: ExtensionAPI) {
   let flutterProcess: TrackedFlutterProcess | null = null;
   let flutterOutput = "";
-  let deviceId: string | null = null;
 
   let savedDevice: SavedDevice | null = null;
   let launchedEmulator: string | null = null;
@@ -91,31 +90,31 @@ export default function (pi: ExtensionAPI) {
 
     function scan(dir: string, depth: number) {
       if (depth > maxDepth) return;
-      let entries: Array<ReturnType<typeof readdirSync>[number]>;
       try {
-        entries = readdirSync(dir, { withFileTypes: true });
+        const entries = readdirSync(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          const name = entry.name as string;
+          if (name.startsWith(".") || SKIP_DIRS.has(name)) continue;
+          if (!entry.isDirectory()) continue;
+          const fullPath = join(dir, name);
+          if (existsSync(join(fullPath, "pubspec.yaml"))) {
+            try {
+              const content = readFileSync(join(fullPath, "pubspec.yaml"), "utf-8");
+              const nameMatch = content.match(/^name:\s*(.+)$/m);
+              results.push({
+                name: nameMatch?.[1]?.trim() || name,
+                path: fullPath,
+                relPath: relative(root, fullPath),
+              });
+            } catch {
+              /* skip unreadable */
+            }
+          } else {
+            scan(fullPath, depth + 1);
+          }
+        }
       } catch {
         return;
-      }
-      for (const entry of entries) {
-        if (entry.name.startsWith(".") || SKIP_DIRS.has(entry.name)) continue;
-        if (!entry.isDirectory()) continue;
-        const fullPath = join(dir, entry.name);
-        if (existsSync(join(fullPath, "pubspec.yaml"))) {
-          try {
-            const content = readFileSync(join(fullPath, "pubspec.yaml"), "utf-8");
-            const nameMatch = content.match(/^name:\s*(.+)$/m);
-            results.push({
-              name: nameMatch?.[1]?.trim() || entry.name,
-              path: fullPath,
-              relPath: relative(root, fullPath),
-            });
-          } catch {
-            /* skip unreadable */
-          }
-        } else {
-          scan(fullPath, depth + 1);
-        }
       }
     }
 
@@ -645,7 +644,7 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const project = resolveProject(ctx.cwd);
-      const targetDevice = params.device || deviceId;
+      const targetDevice = params.device || savedDevice?.id;
       if (flutterProcess) {
         throw new Error("Flutter is already running. Use flutter_hot_reload or flutter_stop first.");
       }
@@ -1086,26 +1085,66 @@ setTimeout(() => { console.error('Timeout'); process.exit(1); }, 15000);
     label: "Flutter Screenshot",
     description: "Take a screenshot of the current device screen. Returns the image path.",
     parameters: Type.Object({}),
-    async execute() {
-      const tmpDir = join(".pi", "tmp");
+    async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
+      const tmpDir = join(ctx.cwd, ".pi", "tmp");
       mkdirSync(tmpDir, { recursive: true });
       const filename = `screenshot_${Date.now()}.png`;
       const outputPath = join(tmpDir, filename);
 
-      const result = await pi.exec("adb", ["exec-out", "screencap", "-p"]);
-      if (result.code !== 0) {
-        throw new Error(`Screenshot failed (exit ${result.code}):\n${result.stdout}`);
-      }
+      const targetDevice = savedDevice?.id;
+      const adbArgs = targetDevice
+        ? ["-s", targetDevice, "exec-out", "screencap", "-p"]
+        : ["exec-out", "screencap", "-p"];
 
-      writeFileSync(outputPath, result.stdout, { flag: "w" });
+      return new Promise((resolve, reject) => {
+        const proc = spawn("adb", adbArgs);
+        const chunks: Buffer[] = [];
+        let stderr = "";
 
-      return {
-        content: [
-          { type: "text" as const, text: `Screenshot saved to \`${outputPath}\`` },
-          { type: "image" as const, path: outputPath },
-        ],
-        details: { path: outputPath },
-      };
+        proc.stdout.on("data", (chunk) => {
+          chunks.push(chunk);
+        });
+
+        proc.stderr.on("data", (data) => {
+          stderr += data.toString();
+        });
+
+        proc.on("close", (code) => {
+          if (code !== 0) {
+            reject(new Error(`Screenshot failed (exit ${code}):\n${stderr}`));
+            return;
+          }
+          try {
+            const buffer = Buffer.concat(chunks);
+            if (buffer.length === 0) {
+              reject(new Error("Screenshot failed: received empty output from adb"));
+              return;
+            }
+            writeFileSync(outputPath, buffer);
+            resolve({
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Screenshot saved to \`${relative(ctx.cwd, outputPath)}\`. Use the \`read\` tool to analyze it.`,
+                },
+              ],
+              details: { path: outputPath },
+            });
+          } catch (err) {
+            reject(err);
+          }
+        });
+
+        proc.on("error", (err) => {
+          reject(err);
+        });
+
+        if (signal) {
+          signal.addEventListener("abort", () => {
+            proc.kill();
+          });
+        }
+      });
     },
   });
 
