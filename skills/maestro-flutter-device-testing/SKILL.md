@@ -159,14 +159,22 @@ maestro hierarchy
 # Run a test flow
 maestro test maestro/flow.yaml
 
-# Single action (write temp YAML)
-cat > /tmp/action.yaml << 'EOF'
+# Single action (use maestro_test_file tool)
+# The tool returns a path in .pi/tmp/ — all test ephemera stays together.
+# Option 1: Tool writes content directly
+maestro_test_file(name: "tap-login", content: "appId: com.example.myapp\n---\n- tapOn: \"login-button\"\n- assertVisible: \"Welcome\"\n")
+maestro test .pi/tmp/maestro-tap-login.yaml
+
+# Option 2: Get path, then write with heredoc (bash)
+maestro_test_file(name: "tap-login")
+# → returns .pi/tmp/maestro-tap-login.yaml — then:
+cat > .pi/tmp/maestro-tap-login.yaml << 'EOF'
 appId: com.example.myapp
 ---
 - tapOn: "login-button"
 - assertVisible: "Welcome"
 EOF
-maestro test /tmp/action.yaml
+maestro test .pi/tmp/maestro-tap-login.yaml
 ```
 
 ### Common Maestro actions
@@ -197,6 +205,8 @@ maestro test /tmp/action.yaml
 
 **Always use the tool**: `flutter_inspect_tree(flat: true)` or `flutter_inspect_tree(search: "button")`
 
+If the tree output shows `⚠️ hint-only` warnings or `undefined` widgets, or Maestro can't find elements you know exist, consult **[accessibility-fixes.md](references/accessibility-fixes.md)** for common Flutter semantics→Maestro mismatches and their fixes.
+
 ### "Which screen is currently visible?"
 
 **Use the tool**: `flutter_current_screen()`
@@ -222,6 +232,10 @@ flutter build apk --debug
 **Use the tool**: `flutter_screenshot()` — returns a file path. The agent cannot view or interpret the image content. Use `flutter_inspect_tree()` and `flutter_current_screen()` to programmatically verify UI state.
 
 CLI fallback: `adb exec-out screencap -p > /tmp/screen.png`
+
+## Accessibility Tree Issues
+
+When `flutter_inspect_tree()` reports `⚠️ hint-only` warnings, `undefined` widgets, or Maestro `tapOn` can't find an element that's clearly on screen, see the reference doc: **[accessibility-fixes.md](references/accessibility-fixes.md)**. It catalogs common Flutter semantics→Maestro mismatches with before/after code examples and the Maestro selector changes needed.
 
 ## Non-Obvious Tips
 
