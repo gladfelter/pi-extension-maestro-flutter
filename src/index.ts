@@ -123,6 +123,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   let selectedProject: FlutterProject | null = null;
+  let activeSessionId: string | null = null;
 
   function projectConfigPath(cwd: string): string {
     return join(cwd, ".pi", "flutter-project.json");
@@ -181,7 +182,8 @@ export default function (pi: ExtensionAPI) {
   }
 
   // ── Session hooks ──────────────────────────────────────────────────
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
+    activeSessionId = event.sessionId;
     const device = loadDeviceConfig(ctx.cwd);
     if (device) {
       savedDevice = device;
@@ -205,6 +207,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (event) => {
+    activeSessionId = null;
     if (event.reason === "reload" && flutterProcess) {
       flutterProcess = null;
       flutterOutput = "";
@@ -645,6 +648,8 @@ export default function (pi: ExtensionAPI) {
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const project = resolveProject(ctx.cwd);
       const targetDevice = params.device || savedDevice?.id;
+      const currentSessionId = activeSessionId;
+
       if (flutterProcess) {
         throw new Error("Flutter is already running. Use flutter_hot_reload or flutter_stop first.");
       }
@@ -676,6 +681,7 @@ export default function (pi: ExtensionAPI) {
       let lastProgressTime = Date.now();
 
       proc.stdout?.on("data", (data: Buffer) => {
+        if (activeSessionId !== currentSessionId || proc !== flutterProcess) return;
         const str = data.toString();
         flutterOutput += str;
         if (flutterOutput.length > 200_000) flutterOutput = flutterOutput.slice(-100_000);
@@ -717,12 +723,14 @@ export default function (pi: ExtensionAPI) {
       });
 
       proc.stderr?.on("data", (data: Buffer) => {
+        if (activeSessionId !== currentSessionId || proc !== flutterProcess) return;
         const str = data.toString();
         flutterOutput += str;
         if (flutterOutput.length > 200_000) flutterOutput = flutterOutput.slice(-100_000);
       });
 
       proc.on("exit", (code) => {
+        if (activeSessionId !== currentSessionId || proc !== flutterProcess) return;
         flutterProcess = null;
         if (!started) {
           pi.sendMessage(
