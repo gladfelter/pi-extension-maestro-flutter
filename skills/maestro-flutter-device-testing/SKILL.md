@@ -1,6 +1,6 @@
 ---
-name: flutter-cli
-description: Flutter CLI fallback reference. Extension tools handle run/connect/reload/screenshot/inspect. Use this skill ONLY for tasks the extension tools don't cover (build, logs, raw VM Service, Maestro, device discovery before connecting).
+   name: maestro-flutter-device-testing
+   description: Flutter development — Extension tools and CLI commands, emulator/device management, building APKs, reading logs, debugging crashes, Maestro UI testing, and raw VM Service access. Use for building, starting, reloading, and restarting Flutter or Dart projects on a device or emulator and inspecting, taking screenshots, debugging and driving the app. Covers adb, flutter and maestro.
 ---
 
 # Flutter CLI Reference
@@ -11,30 +11,30 @@ The extension provides stateful tools that track device connections, VM Service 
 
 ### Extension Tools (ALWAYS use these)
 
-| Task | Tool | Notes |
-|---|---|---|
-| **Connect to device/emulator** | `flutter_connect(id: "emulator-5554")` | Saves device preference; required before running |
-| **Disconnect** | `flutter_disconnect()` | Cleans up emulator/network device |
-| **Launch the app** | `flutter_run()` | Tracks VM Service URL, process handle, log stream |
-| **Stop the app** | `flutter_stop()` | Cleans up tracked state |
-| **Hot reload** | `flutter_hot_reload()` | Sends `r` to running flutter process |
-| **Hot restart** | `flutter_hot_restart()` | Sends `R`; recovers VM Service URL |
-| **Widget tree** | `flutter_inspect_tree(flat: true)` | Compact label list; use `search: "button"` to filter |
-| **Screenshot** | `flutter_screenshot()` | Returns image path + attachment |
-| **Current screen** | `flutter_current_screen()` | Returns visible activity name |
-| **App status** | `flutter_app_status()` | Running / stopped / crashed |
+| Task                           | Tool                                   | Notes                                                |
+| ------------------------------ | -------------------------------------- | ---------------------------------------------------- |
+| **Connect to device/emulator** | `flutter_connect(id: "emulator-5554")` | Saves device preference; required before running     |
+| **Disconnect**                 | `flutter_disconnect()`                 | Cleans up emulator/network device                    |
+| **Launch the app**             | `flutter_run()`                        | Tracks VM Service URL, process handle, log stream    |
+| **Stop the app**               | `flutter_stop()`                       | Cleans up tracked state                              |
+| **Hot reload**                 | `flutter_hot_reload()`                 | Sends `r` to running flutter process                 |
+| **Hot restart**                | `flutter_hot_restart()`                | Sends `R`; recovers VM Service URL                   |
+| **Widget tree**                | `flutter_inspect_tree(flat: true)`     | Compact label list; use `search: "button"` to filter |
+| **Screenshot**                 | `flutter_screenshot()`                 | Returns image path + attachment                      |
+| **Current screen**             | `flutter_current_screen()`             | Returns visible activity name                        |
+| **App status**                 | `flutter_app_status()`                 | Running / stopped / crashed                          |
 
 ### CLI Fallback (ONLY when no extension tool exists)
 
-| Task | Command | When to use |
-|---|---|---|
-| List available emulators | `flutter emulators` | Before `flutter_connect` to find AVD names |
-| Check ADB devices | `adb devices` | Diagnosing connection issues |
-| Build APK/bundle | `flutter build apk` | Extension doesn't have a build tool |
-| View logs | `flutter log` or `adb logcat` | Debugging crashes, rendering issues |
-| Maestro testing | `maestro hierarchy` / `maestro test flow.yaml` | UI test automation |
-| Raw VM Service | Node script with `ws` | Focus tree, custom isolate queries |
-| Launch emulator (WSL2) | `sg kvm -c "emulator -avd test_34 ..."` | Before `flutter_connect` if no device |
+| Task                     | Command                                        | When to use                                |
+| ------------------------ | ---------------------------------------------- | ------------------------------------------ |
+| List available emulators | `flutter emulators`                            | Before `flutter_connect` to find AVD names |
+| Check ADB devices        | `adb devices`                                  | Diagnosing connection issues               |
+| Build APK/bundle         | `flutter build apk`                            | Extension doesn't have a build tool        |
+| View logs                | `flutter log` or `adb logcat`                  | Debugging crashes, rendering issues        |
+| Maestro testing          | `maestro hierarchy` / `maestro test flow.yaml` | UI test automation                         |
+| Raw VM Service           | Node script with `ws`                          | Focus tree, custom isolate queries         |
+| Launch emulator (WSL2)   | `sg kvm -c "emulator -avd test_34 ..."`        | Before `flutter_connect` if no device      |
 
 ## Workflow: Starting an App
 

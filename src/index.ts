@@ -931,13 +931,36 @@ setTimeout(() => { console.error('Timeout'); process.exit(1); }, 15000);
       // So we check for the app's own package via pidof.
       try {
         const project = resolveProject(ctx.cwd);
-        const manifestPath = join(project.path, "android", "app", "src", "main", "AndroidManifest.xml");
         let packageName: string | null = null;
-        if (existsSync(manifestPath)) {
+
+        // Try manifest first (older Flutter projects)
+        const manifestPath = join(project.path, "android", "app", "src", "main", "AndroidManifest.xml");
+        if (!packageName && existsSync(manifestPath)) {
           const manifest = readFileSync(manifestPath, "utf-8");
           const pkgMatch = manifest.match(/package="([^"]+)"/);
           if (pkgMatch) packageName = pkgMatch[1];
         }
+
+        // Try build.gradle.kts (modern Flutter / Kotlin DSL)
+        if (!packageName) {
+          const gradleKtsPath = join(project.path, "android", "app", "build.gradle.kts");
+          if (existsSync(gradleKtsPath)) {
+            const gradleKts = readFileSync(gradleKtsPath, "utf-8");
+            const appIdMatch = gradleKts.match(/applicationId\s*=\s*"([^"]+)"/);
+            if (appIdMatch) packageName = appIdMatch[1];
+          }
+        }
+
+        // Try build.gradle (Groovy DSL)
+        if (!packageName) {
+          const gradlePath = join(project.path, "android", "app", "build.gradle");
+          if (existsSync(gradlePath)) {
+            const gradle = readFileSync(gradlePath, "utf-8");
+            const appIdMatch = gradle.match(/applicationId\s+["']?([^"'\n]+)["']?/);
+            if (appIdMatch) packageName = appIdMatch[1];
+          }
+        }
+
         if (packageName) {
           const pidResult = await pi.exec("adb", ["shell", "pidof", packageName]);
           if (pidResult.stdout.trim()) {
