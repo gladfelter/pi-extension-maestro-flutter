@@ -1,180 +1,254 @@
 ---
 name: flutter-cli
-description: Flutter, ADB, and Maestro CLI reference for device management, app debugging, and UI testing. Use when extension tools are too limited (need filtering, searching, or composing output) or for tasks not covered by extension tools.
+description: Flutter, ADB, and Maestro CLI reference. Use for device management, building, logging, UI testing, and any task not covered by extension tools.
 ---
 
 # Flutter CLI Reference
 
-Extension tools handle the **90% case**: `flutter_run`, `flutter_stop`, `flutter_hot_reload`, `flutter_inspect_tree`, `flutter_screenshot`, `flutter_current_screen`, `flutter_app_status`.
+## Quick Reference: Tools vs CLI
 
-Use CLI for everything else — filtering, searching, composing, and edge cases.
-
-### Removed tools (use CLI instead)
-| Removed tool | CLI equivalent |
-|---|---|
-| `flutter_devices` | `flutter devices` / `flutter emulators` / `adb devices` |
-| `flutter_build` | `flutter build <target>` (see below) |
-| `flutter_log` | `flutter log` / `adb logcat` (see below) |
-| `flutter_vm_call` | See VM Service section — write a node script using `ws` |
-| `flutter_inspect_focus` | See `flutter_inspect_tree` with `flat: true` or CLI VM Service call |
-| `maestro_hierarchy` | `maestro hierarchy` (see below) |
-| `maestro_test` | `maestro test <flow.yaml>` (see below) |
-| `maestro_action` | Write a temp YAML flow and run `maestro test` |
+| Task | How | Example |
+|---|---|---|
+| Run app | `flutter_run` tool | — |
+| Stop app | `flutter_stop` tool | — |
+| Hot reload / restart | `flutter_hot_reload` / `flutter_hot_restart` | — |
+| Connect device / emulator | `flutter_connect` tool | — |
+| Disconnect | `flutter_disconnect` tool | — |
+| Inspect widget tree | `flutter_inspect_tree` tool | `flat: true` for compact label list |
+| Search widgets by label | `flutter_inspect_tree` with `search` | `search: "login-button"` |
+| Screenshot | `flutter_screenshot` tool | — |
+| Current screen | `flutter_current_screen` tool | — |
+| App status | `flutter_app_status` tool | — |
+| List devices | CLI | `flutter devices` |
+| List emulators | CLI | `flutter emulators` |
+| Build APK / IPA / bundle | CLI | `flutter build apk` |
+| View logs | CLI | `flutter log` or `adb logcat` |
+| Raw VM Service calls | CLI (node script) | See VM Service section |
+| Focus tree dump | CLI (node script) | `ext.flutter.debugDumpFocusTree` |
+| Maestro hierarchy | CLI | `maestro hierarchy` |
+| Run Maestro test flows | CLI | `maestro test flow.yaml` |
+| Single Maestro action | CLI | `maestro test temp.yaml` |
 
 ## Device & Emulator Management
 
 ```bash
-# List devices (extension flutter_devices wraps this)
+# List connected devices
 flutter devices
 
-# List available emulators
+# List available emulators (show ID in first column)
 flutter emulators
 
-# Launch emulator (extension flutter_connect wraps this)
-flutter emulators --launch <id>
+# Launch emulator by AVD name
+flutter emulators --launch test_34
 
-# Check if emulator is booted
+# Check if emulator is fully booted
 adb shell getprop sys.boot_completed   # "1" = ready
 
-# Check KVM access (Linux)
-ls -la /dev/kvm                        # exists + readable = OK
-cat /dev/kvm > /dev/null 2>&1 && echo "KVM OK" || echo "No KVM access"
+# Check KVM access (Linux — required for fast emulation)
+cat /dev/kvm > /dev/null 2>&1 && echo "KVM OK" || echo "No KVM"
 
-# Fix KVM (one-time)
+# If no KVM: add your user to the kvm group, then log out + back in
 sudo gpasswd -a $USER kvm
 ```
 
-## App Process Debugging
+## Building
 
 ```bash
-# Find running Flutter processes on device
-adb shell ps | grep flutter
+# Debug APK (fastest, includes debug symbols)
+flutter build apk --debug
 
-# Get Dart VM service port
-adb shell ps | grep flutter | awk '{print $NF}'   # last field has --dart-define or port info
+# Release APK
+flutter build apk
 
-# Forward VM service port to host
-adb forward tcp:<host-port> tcp:<device-port>
+# iOS archive
+flutter build ios --release
 
-# Screenshot
-adb exec-out screencap -p > screenshot.png
+# Web bundle
+flutter build web
 
-# Screen record (30s)
-adb shell screenrecord /sdcard/recording.mp4 &
-sleep 30 && adb pull /sdcard/recording.mp4
+# Android App Bundle (for Play Store)
+flutter build appbundle
+
+# Clean build cache (if build is broken)
+flutter clean && flutter build apk
 ```
 
 ## Logs
 
 ```bash
-# Flutter logs (cleaner than logcat)
-flutter logs
+# Flutter framework logs (most useful for debugging UI issues)
+flutter log
 
-# ADB logcat filtered for Flutter
-adb logcat | grep -E "Flutter|I/ActivityManager|E/AndroidRuntime"
+# Flutter logs + device system logs
+flutter log -v
 
-# Follow logs in real-time
-adb logcat -s FlutterActivity:V FlutterMain:V
+# ADB logcat — filter by tag or level
+adb logcat --pid=$(adb shell pidof app.$PACKAGE) -s Flutter:V
 
-# Clear logcat buffer
-adb logcat -c
-
-# Recent crashes only
+# Crash logs only
 adb logcat -b crash -t 50
+
+# Dart error stream
+adb logcat -s FlutterRun:E
 ```
 
-## Package & APK
+## VM Service (WebSocket)
 
-```bash
-# Find APK location
-adb shell pm path com.pi.extension.test_app
+The extension tracks the VM Service URL when `flutter_run` starts. For raw VM Service calls (focus tree, custom queries), write a node script:
 
-# Pull APK from device
-adb pull <path-from-pm-path> ./app.apk
+```javascript
+const WebSocket = require("ws");
 
-# List build artifacts
-find build/ -name "*.apk" -o -name "*.appbundle" | sort
+// Get URL from flutter_run output or:
+// adb shell dumpsys activity top | grep "ACTIVITY" then find the PID
+const url = "ws://127.0.0.1:36319/:ws";  // replace http with ws, add /:ws
 
-# Check app is installed
-adb shell pm list packages | grep test_app
+const ws = new WebSocket(url);
+ws.on("open", () => {
+  // 1. Get isolate ID
+  ws.send(JSON.stringify({ jsonrpc: "2.0", id: "1", method: "getVM" }));
+});
+ws.on("message", (data) => {
+  const resp = JSON.parse(data.toString());
+  if (resp.id === "1") {
+    const isolateId = resp.result.isolates[0].id;
+    // 2. Call extension method (e.g. focus tree)
+    ws.send(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: "2",
+        method: "ext.flutter.debugDumpFocusTree",
+        params: { isolateId },
+      }),
+    );
+  } else if (resp.id === "2") {
+    console.log(resp.result.data || JSON.stringify(resp.result));
+    ws.close();
+    process.exit(0);
+  }
+});
 ```
 
-## VM Service (Direct Access)
-
-When extension `flutter_vm_call` doesn't fit:
+## Maestro UI Testing
 
 ```bash
-# Get VM service URL from running app
-adb shell ps | grep flutter   # look for ws:// or http:// in command line
-
-# Or from flutter run output
-flutter attach --machine | grep vmService
-
-# Call VM service directly (e.g., get heap info)
-curl "http://127.0.0.1:<port>/json" | jq .
-
-# Widget tree via HTTP (alternative to WebSocket)
-curl "http://127.0.0.1:<port>/_dumpApp"
-```
-
-## Maestro CLI
-
-```bash
-# Full UI hierarchy (extension wraps this)
+# Get current accessibility hierarchy (JSON)
 maestro hierarchy
 
-# Filter hierarchy for semantics labels only
-maestro hierarchy | jq '.. | .attributes? // empty | select(.accessibilityText != "") | .accessibilityText'
-
 # Run a test flow
-maestro test maestro/home_counter.yaml
+maestro test maestro/login_flow.yaml
 
-# Run with recording
-maestro test maestro/home_counter.yaml --format mp4
+# Run with environment variables
+MASTERO_ENV=staging maestro test maestro/flow.yaml
 
-# Start interactive Maestro CLI (tap/click in terminal)
-maestro interactive
-
-# Check if Maestro is installed
-maestro doctor
+# Single action (write a temp YAML and run it)
+cat > /tmp/action.yaml << 'EOF'
+appId: com.example.myapp
+---
+- tapOn: "login-button"
+- assertVisible: "Welcome"
+EOF
+maestro test /tmp/action.yaml
 ```
 
-## When to Use CLI vs Extension Tools
+### Common Maestro actions
 
-| Task | Use |
-|------|-----|
-| Run app, hot reload, stop | Extension (`flutter_run`, `flutter_hot_reload`, `flutter_stop`) |
-| VM service calls (inspect tree, focus) | Extension (`flutter_inspect_tree`, `flutter_inspect_focus`) |
-| Search/filter widget tree | CLI (`maestro hierarchy \| jq ...`) |
-| Read recent logs | Extension (`flutter_log`) |
-| Debug crashes, filter logcat | CLI (`adb logcat \| grep ...`) |
-| Launch/connect device | Extension (`flutter_connect`) |
-| Advanced device/emulator ops | CLI (`adb shell ps`, `screencap`) |
-| Run maestro test flow | Extension (`maestro_test`) |
-| Compose/transform hierarchy | CLI (`maestro hierarchy \| jq ...`) |
-| Build APK | Extension (`flutter_build`) |
-| Find APK on disk | CLI (`find build/`) |
+```yaml
+# Tap by text or accessibility label
+- tapOn: "Sign In"
 
-## Common Patterns
+# Tap by coordinates
+- tapOn: { point: "50%,50%" }
 
-**Check if app is already running before flutter_run:**
+# Type text into a field
+- tapOn: "username-field"
+- inputText: "alice"
+
+# Scroll (vertical)
+- scroll
+- scroll: { direction: "down", amount: 500 }
+
+# Assert visibility
+- assertVisible: "Welcome"
+- assertNotVisible: "Error"
+
+# Wait for element
+- waitFor: "loading-spinner"
+- tapOn: "loading-spinner"
+- assertNotVisible: "loading-spinner"
+
+# Swipe
+- swipe: { start: "50%,80%", end: "50%,20%" }
+```
+
+## Common Scenarios
+
+### "App won't launch"
+
 ```bash
-adb shell ps | grep com.pi.extension.test_app
-# If found, use flutter attach instead
+# Check if device is connected
+adb devices
+
+# Check if Flutter is already running on the device
+adb shell ps -A | grep -i flutter
+
+# If stuck, kill the flutter process on device
+adb shell pkill -f flutter
+# Then use flutter_run tool again (it will auto-detect and attach vs run)
 ```
 
-**Get just semantics labels from hierarchy:**
-```bash
-maestro hierarchy | jq -r '.. | .attributes? // empty | select(.accessibilityText != "") | "\(.accessibilityText)"'
+### "Need to find a widget's semantics label"
+
+Use the `flutter_inspect_tree` tool with `flat: true` for a compact list:
+```
+flutter_inspect_tree(flat: true)
+```
+Or search by keyword:
+```
+flutter_inspect_tree(search: "button")
 ```
 
-**Find clickable widgets with bounds:**
+### "Which screen is currently visible?"
+
+Use the `flutter_current_screen` tool (returns the Android activity name). Or via CLI:
 ```bash
-maestro hierarchy | jq '[.. | objects | select(.clickable == true and .attributes.text != "") | {label: .attributes.accessibilityText, bounds: .attributes.bounds}]'
+adb shell dumpsys activity top | grep ACTIVITY
 ```
 
-**Quick app state check:**
+### "App crashed — why?"
+
 ```bash
-adb shell dumpsys activity top | grep ACTIVITY   # current screen
-adb shell content query --uri content://com.android.shell.settings/system | grep currentPackageName
+# Use flutter_app_status tool for a quick check
+# Or get crash logs directly:
+adb logcat -b crash -t 20
 ```
+
+### "Build is failing / stuck"
+
+```bash
+# Clean and rebuild
+flutter clean
+flutter pub get
+flutter build apk --debug
+```
+
+### "Need more verbose output from flutter run"
+
+```bash
+flutter run -v   # verbose mode, shows all internal steps
+```
+
+### "Take a screenshot and inspect it"
+
+Use the `flutter_screenshot` tool — it returns both a text path and the image. Or via CLI:
+```bash
+adb exec-out screencap -p > /tmp/screen.png
+```
+
+## Non-Obvious Tips
+
+- **Hot reload after crash**: If the app crashed, hot reload won't work. Use `flutter_hot_restart` or kill and re-run.
+- **Emulator slow on Linux**: Almost always a KVM issue. Run `cat /dev/kvm > /dev/null 2>&1 || echo "NO KVM"` to check.
+- **VM Service URL changes on hot restart**: The extension re-detects it automatically via stdout parsing.
+- **Maestro on emulator**: The `assertVisible` command can sometimes fail due to Maestro driver connection timeouts on emulators — this is a Maestro limitation, not a test issue. Retry the test if it fails intermittently.
+- **Multiple Flutter projects in workspace**: Use `/flutter-project <name>` to select which one the extension tools target.
