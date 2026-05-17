@@ -9,6 +9,24 @@
 
 The extension provides stateful tools that track device connections, VM Service URLs, and running processes. **Always prefer extension tools over raw CLI.** Bypassing them breaks the agent's state tracking.
 
+### ⚠️ NO "FUCKERY" — Don't Bypas the Extension
+
+"Fuckery" refers to any agent action that manipulates the app state outside of the provided tools. Bypassing the extension breaks state tracking and makes debugging impossible.
+
+**DO NOT:**
+- Run `flutter run` in the terminal. Use `flutter_run()`.
+- Use `adb shell am start ...` to launch the app. Use `flutter_run()`.
+- Use `adb shell am force-stop ...` to stop the app. Use `flutter_stop()`.
+- Use `adb shell pkill -f ...` to kill the app. Use `flutter_stop()`.
+
+**WHY:**
+The extension tracks the background `flutter` process, its VM Service URL (required for hot reload/restart and tree inspection), and its connection to the device. If you start/stop the app manually:
+1. `flutter_hot_reload` and `flutter_hot_restart` will fail or do nothing.
+2. `flutter_inspect_tree` will return stale or no data.
+3. `flutter_app_status` will report "FUCKERY DETECTED".
+
+**FIX:** If you find yourself in a "Fuckery" state (detected by `flutter_app_status`), run `flutter_stop()` followed by `flutter_run()` to reset the connection.
+
 ### Extension Tools (ALWAYS use these)
 
 | Task                           | Tool                                   | Notes                                                |
@@ -23,6 +41,32 @@ The extension provides stateful tools that track device connections, VM Service 
 | **Screenshot**                 | `flutter_screenshot()`                 | Returns image path only (agent cannot view images)   |
 | **Current screen**             | `flutter_current_screen()`             | Returns visible activity name                        |
 | **App status**                 | `flutter_app_status()`                 | Running / stopped / crashed                          |
+
+## ⚠️ TIMEOUTS — Critical for Physical Devices
+
+**Emulators are fast. Physical devices (especially Fire TV / Android TV sticks)
+are very slow.** Every `maestro` and `adb` CLI command that touches a real
+device MUST use generous `timeout=` values or it will hang mid-test.
+
+| Device Type | `maestro test` timeout | `maestro hierarchy` timeout | `flutter_screenshot` | D-pad press latency |
+|------------|----------------------|---------------------------|---------------------|-------------------|
+| Emulator   | 30s (default fine)   | 15s                       | 10s                 | < 1s              |
+| Fire TV / physical Android TV | **120s minimum** | **60s** | `timeoutMs: 30000` | 3–10s each |
+| Other physical Android | 60s | 30s | `timeoutMs: 15000` | 1–3s each |
+
+```bash
+# WRONG — will hang on physical device
+maestro test flow.yaml
+
+# CORRECT — generous timeout for physical device
+maestro test flow.yaml  # bash timeout=120s
+
+# CORRECT — hierarchy dump with timeout
+maestro hierarchy | sed '1d' > /tmp/h.json  # bash timeout=60s
+```
+
+**Rule of thumb**: If you're testing on a physical device, add at least 10s
+of timeout per D-pad key press in your Maestro flow, plus 30s overhead.
 
 ### CLI Fallback (ONLY when no extension tool exists)
 
@@ -42,7 +86,7 @@ The extension provides stateful tools that track device connections, VM Service 
 2. **Launch emulator if needed**: CLI only — see below
 3. **Connect**: `flutter_connect(id: "emulator-5554")` — **ALWAYS use the tool**
 4. **Run app**: `flutter_run()` — **ALWAYS use the tool** (not `flutter run`)
-5. **END YOUR TURN** — `flutter_run()` returns immediately while the app builds in the background. Do NOT call any further tools (no polling with `flutter_app_status`, `flutter_inspect_tree`, etc). Just end your response without invoking a tool call — that's how the agent yields and waits. The extension will send you a follow-up message when the app is ready (or if it failed).
+5. **END YOUR TURN** — `flutter_run()` returns immediately while the app builds in the background. **DO NOT perform any ADB, Maestro, or Flutter operations while the app is starting up.** Do NOT call any further tools (no polling with `flutter_app_status`, `flutter_inspect_tree`, etc). Just end your response without invoking a tool call — that's how the agent yields and waits. The extension will send you a follow-up message when the app is ready (or if it failed).
 
 ### After the app is ready (you'll be woken by a follow-up message)
 
@@ -246,3 +290,10 @@ When `flutter_inspect_tree()` reports `⚠️ hint-only` warnings, `undefined` w
 - **Multiple Flutter projects in workspace**: Use `/flutter-project <name>` to select the target project.
 - **Never run `flutter run` from CLI**: The `flutter_run()` tool wraps it and tracks the VM Service URL, process handle, and device state. Running CLI directly means the extension loses track of the running app.
 - **`flutter_run()` is fire-and-forget**: It returns immediately. The app builds in the background. The extension will send a follow-up message when it's ready or if it crashed. After calling `flutter_run()`, end your turn without invoking any further tool calls — that yields control and lets the follow-up message resume you. Progress updates arrive as steer messages (informational, don't act on them).
+
+## Fire TV / Android TV Quirks
+
+- **`flutter_current_screen()` on Fire TV**: The tool now queries `mResumedActivity` from `dumpsys activity activities`, which correctly reports the Flutter app even when the Fire TV launcher sits on top in the task stack. Falls back to `dumpsys activity top` (last ACTIVITY line) on older Android.
+- **`Semantics(identifier:)` does NOT populate `resource-id` on Fire TV**: The identifier value appears in `accessibilityText` instead. Maestro's `id:` selector does not work. Use plain text matching (`assertVisible: "Button Label"`) for TV app tests.
+- **D-pad presses are slow on Fire TV Stick**: Each `Remote Dpad` key press in Maestro can take 3–10 seconds. Always use generous `timeout=` values (at least 120s for multi-step flows) on every on-device `bash` call.
+- **`maestro hierarchy` output has a non-JSON prefix**: The first line is `Running on <ip>:<port>`. Strip it with `sed '1d'` before JSON parsing.

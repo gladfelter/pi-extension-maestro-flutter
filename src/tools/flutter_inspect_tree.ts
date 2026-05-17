@@ -34,7 +34,7 @@ export function createFlutterInspectTreeTool(state: ExtensionState) {
       }
 
       // Default: compact semantics labels via maestro hierarchy
-      const result = await state.pi.exec("maestro", ["hierarchy"], { timeout: 30000, signal });
+      const result = await state.pi.exec("maestro", ["hierarchy"], { timeout: 120000, signal });
       if (result.code !== 0) {
         throw new Error(`maestro hierarchy failed (exit ${result.code}):\n${result.stdout}`);
       }

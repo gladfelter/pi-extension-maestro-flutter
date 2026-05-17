@@ -639,15 +639,25 @@ export default function (pi: ExtensionAPI) {
       const isAdbDevice =
         targetDevice && (targetDevice.startsWith("emulator-") || targetDevice.startsWith("127.0.0.1"));
       let useAttach = false;
+      const packageName = getPackageName(ctx.cwd);
+
       if (isAdbDevice) {
         try {
-          const psResult = await pi.exec("adb", ["-s", targetDevice, "shell", "ps", "-A"], {
-            timeout: 5000,
+          const pidResult = await pi.exec("adb", ["-s", targetDevice, "shell", "pidof", packageName || "NO_PKG"], {
+            timeout: 2000,
             signal,
           });
-          useAttach = psResult.stdout.toLowerCase().includes("flutter");
+          if (pidResult.stdout.trim()) {
+            useAttach = true;
+          } else {
+            const psResult = await pi.exec("adb", ["-s", targetDevice, "shell", "ps", "-A"], {
+              timeout: 5000,
+              signal,
+            });
+            useAttach = psResult.stdout.toLowerCase().includes("flutter");
+          }
         } catch {
-          /* adb not available */
+          /* adb not available or pidof failed */
         }
       }
 
@@ -664,6 +674,7 @@ export default function (pi: ExtensionAPI) {
       let started = false;
       let buildFailed = false;
       let lastProgressTime = Date.now();
+      let lastCheckedOutputIndex = 0;
 
       // Patterns that indicate a build failure (not transient warnings)
       const BUILD_FAILURE_PATTERNS = [
@@ -680,18 +691,22 @@ export default function (pi: ExtensionAPI) {
         /Compilation failed/,
         /compileDebugKotlin FAILED/,
         /compileDebugJavaWithJavac FAILED/,
+        /Reloading\.\.\. failed/,
+        /Hot reload failed/,
+        /Restarting\.\.\. failed/,
+        /Hot restart failed/,
+        /Unhandled exception:/,
       ];
 
-      proc.stdout?.on("data", (data: Buffer) => {
-        if (s.activeSessionId !== currentSessionId || proc !== s.flutterProcess) return;
-        const str = data.toString();
-        s.flutterOutput += str;
-        if (s.flutterOutput.length > 200_000) s.flutterOutput = s.flutterOutput.slice(-100_000);
+      const checkOutputForFailures = () => {
+        if (buildFailed) return;
+        const newContent = s.flutterOutput.slice(lastCheckedOutputIndex);
+        if (!newContent) return;
 
-        // Detect build failures before the app starts
-        if (!started && !buildFailed) {
-          for (const pattern of BUILD_FAILURE_PATTERNS) {
-            if (pattern.test(str)) {
+        for (const pattern of BUILD_FAILURE_PATTERNS) {
+          if (pattern.test(newContent)) {
+            // For initial build, we treat it as a terminal failure for the 'run' command
+            if (!started) {
               buildFailed = true;
               pi.sendMessage(
                 {
@@ -702,27 +717,56 @@ export default function (pi: ExtensionAPI) {
                 },
                 { deliverAs: "followUp", triggerTurn: true },
               );
-              break;
+            } else {
+              // For hot reload/restart, we just notify the agent so they can fix the code
+              pi.sendMessage(
+                {
+                  customType: "reload_failed",
+                  content: `⚠️ Flutter reload/restart failed. Check the logs for compilation errors.\n\n${newContent.slice(-2000)}`,
+                  display: true,
+                  details: { running: true, logs: newContent.slice(-1000) },
+                },
+                { deliverAs: "steer" },
+              );
             }
+            break;
           }
         }
+        lastCheckedOutputIndex = s.flutterOutput.length;
+      };
 
-        if (!started) {
-          const match = str.match(
-            /(?:Dart VM Service.*?available at:|Connecting to VM Service at) (https?:\/\/[\S\/:]+\/)/,
-          );
-          if (match) {
-            proc.vmServiceUrl = match[1];
-            started = true;
-            pi.sendMessage(
-              {
-                customType: "run_started",
-                content: `✅ Flutter app is running!\n\nDevice: ${targetDevice || "default"}\nVM Service: ${proc.vmServiceUrl}\n\nHot reload and inspect tools are now available.`,
-                display: true,
-                details: { running: true, vmServiceUrl: proc.vmServiceUrl },
-              },
-              { deliverAs: "followUp", triggerTurn: true },
-            );
+      proc.stdout?.on("data", (data: Buffer) => {
+        if (s.activeSessionId !== currentSessionId || proc !== s.flutterProcess) return;
+        const str = data.toString();
+        s.flutterOutput += str;
+        if (s.flutterOutput.length > 200_000) {
+          s.flutterOutput = s.flutterOutput.slice(-100_000);
+          lastCheckedOutputIndex = Math.max(0, lastCheckedOutputIndex - 100_000);
+        }
+
+        checkOutputForFailures();
+
+        const urlMatches = Array.from(
+          s.flutterOutput.matchAll(
+            /(?:Dart VM Service.*?available at:|Connecting to VM Service at|The Dart VM service is listening on) (https?:\/\/[\S\/:]+\/?)/g,
+          ),
+        );
+        if (urlMatches.length > 0) {
+          const lastUrl = urlMatches[urlMatches.length - 1][1];
+          if (proc.vmServiceUrl !== lastUrl) {
+            proc.vmServiceUrl = lastUrl;
+            if (!started) {
+              started = true;
+              pi.sendMessage(
+                {
+                  customType: "run_started",
+                  content: `✅ Flutter app is running!\n\nDevice: ${targetDevice || "default"}\nVM Service: ${proc.vmServiceUrl}\n\nHot reload and inspect tools are now available.`,
+                  display: true,
+                  details: { running: true, vmServiceUrl: proc.vmServiceUrl },
+                },
+                { deliverAs: "followUp", triggerTurn: true },
+              );
+            }
           }
         }
 
@@ -747,7 +791,11 @@ export default function (pi: ExtensionAPI) {
         if (s.activeSessionId !== currentSessionId || proc !== s.flutterProcess) return;
         const str = data.toString();
         s.flutterOutput += str;
-        if (s.flutterOutput.length > 200_000) s.flutterOutput = s.flutterOutput.slice(-100_000);
+        if (s.flutterOutput.length > 200_000) {
+          s.flutterOutput = s.flutterOutput.slice(-100_000);
+          lastCheckedOutputIndex = Math.max(0, lastCheckedOutputIndex - 100_000);
+        }
+        checkOutputForFailures();
       });
 
       proc.on("exit", (code) => {
@@ -789,7 +837,11 @@ export default function (pi: ExtensionAPI) {
         content: [
           {
             type: "text",
-            text: `🚀 Starting app: ${commandLabel}\n\nYou may do other work, but do not sleep or wait for this operation. End work if you have no other tasks. You will be notified when the app is running.\n\n`,
+            text: `🚀 Starting app: ${commandLabel}\n\n` +
+              `**DO NOT use ADB, Maestro, or other Flutter tools while the build is in progress.** ` +
+              `Doing so can corrupt the process and cause state tracking to fail.\n\n` +
+              `You may work on code or other files, but do not sleep or wait for this operation. ` +
+              `End your turn now; you will be notified when the app is running.`,
           },
         ],
         details: { background: true },
@@ -798,7 +850,15 @@ export default function (pi: ExtensionAPI) {
   });
 
   // @ts-ignore - extracted tool type inference
-  pi.registerTool(createFlutterStopTool(state));
+  pi.registerTool(
+    createFlutterStopTool(state, async (ctx) => {
+      const pkg = getPackageName(ctx.cwd);
+      const device = s.savedDevice?.id;
+      if (pkg && device) {
+        await pi.exec("adb", ["-s", device, "shell", "am", "force-stop", pkg], { timeout: 5000 });
+      }
+    }),
+  );
 
   // @ts-ignore - extracted tool type inference
   pi.registerTool(createFlutterHotReloadTool(state));
@@ -842,38 +902,35 @@ export default function (pi: ExtensionAPI) {
         return Math.max(500, Math.floor((totalTimeout - (Date.now() - startedAt)) * share));
       }
 
+      const device = s.savedDevice;
+      const packageName = getPackageName(ctx.cwd);
+
       // Pre-flight: check if device is connected
-      if (s.savedDevice) {
-        const connected = await isAdbDeviceConnected(s.savedDevice.id);
+      if (device) {
+        const connected = await isAdbDeviceConnected(device.id);
         if (!connected) {
           return {
-            content: [{ type: "text" as const, text: `⚠️ Device \`${s.savedDevice.id}\` is disconnected.` }],
+            content: [{ type: "text" as const, text: `⚠️ Device \`${device.id}\` is disconnected.` }],
             details: { running: false as const, connected: false as const },
           };
         }
       }
 
       // Check 1: Is the tracked flutter process still alive with a valid VM Service URL?
+      let trackedProcessHealthy = false;
       if (s.flutterProcess && s.flutterProcess.vmServiceUrl && !s.flutterProcess.killed) {
         // Verify VM Service is actually reachable (check from host)
         try {
-          const vmHost = s.flutterProcess.vmServiceUrl.replace("http://", "").split(":")[0];
-          const vmPort = s.flutterProcess.vmServiceUrl.replace("http://", "").split(":")[1]?.split("/")[0];
+          const url = new URL(s.flutterProcess.vmServiceUrl);
+          const vmHost = url.hostname;
+          const vmPort = url.port;
           if (vmHost && vmPort) {
             const pingResult = await pi.exec("curl", ["--max-time", "3", "-s", `http://${vmHost}:${vmPort}/json`], {
               timeout: budget(0.2),
               signal,
             });
             if (pingResult.code === 0 && pingResult.stdout.includes("isolate")) {
-              return {
-                content: [
-                  {
-                    type: "text" as const,
-                    text: `✅ Flutter app is running\n\nVM Service: ${s.flutterProcess.vmServiceUrl}`,
-                  },
-                ],
-                details: { running: true as const, vmServiceUrl: s.flutterProcess.vmServiceUrl },
-              };
+              trackedProcessHealthy = true;
             }
           }
         } catch {
@@ -882,30 +939,73 @@ export default function (pi: ExtensionAPI) {
       }
 
       // Check 2: Is the Flutter app process running on the device?
-      // On modern Android (API 30+), ps output shows the app's package name, not "flutter".
-      // So we check for the app's own package via pidof.
-      const packageName = getPackageName(ctx.cwd);
-      if (packageName) {
+      let devicePid: string | null = null;
+      if (packageName && device) {
         try {
-          const pidResult = await pi.exec("adb", ["shell", "pidof", packageName], {
+          const pidResult = await pi.exec("adb", ["-s", device.id, "shell", "pidof", packageName], {
             timeout: budget(0.15),
             signal,
           });
-          if (pidResult.stdout.trim()) {
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text: `✅ Flutter app is running (package: ${packageName})\n\nPID: ${pidResult.stdout.trim()}`,
-                },
-              ],
-              details: { running: true as const, package: packageName, pid: pidResult.stdout.trim() },
-            };
-          }
+          devicePid = pidResult.stdout.trim() || null;
         } catch {
           /* pidof failed, likely not running */
         }
       }
+
+      // ── FUCKERY DETECTION ──────────────────────────────────────────
+
+      // Case A: App is running on device, but extension has no tracked process
+      if (devicePid && !s.flutterProcess) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text:
+                `⚠️ FUCKERY DETECTED: App \`${packageName}\` is running on device (PID ${devicePid}), but it is NOT connected to the Flutter tool.\n\n` +
+                `This happens if you used \`adb shell am start\` or started the app without using \`flutter_run\`. ` +
+                `Hot reload and hot restart will NOT work.\n\n` +
+                `FIX: Use \`flutter_stop\` then \`flutter_run\` to restart the app properly.`,
+            },
+          ],
+          details: { running: true as const, connected: false as const, pid: devicePid, fuckery: "zombie_app" },
+        };
+      }
+
+      // Case B: Tracked process exists but VM Service is unreachable, yet app is still on device
+      if (s.flutterProcess && !trackedProcessHealthy && devicePid) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text:
+                `⚠️ DISCONNECTION DETECTED: The Flutter tool is running, but it lost contact with the app on the device (PID ${devicePid}).\n\n` +
+                `This often happens if the app crashed and was restarted manually, or if ADB was manipulated directly.\n\n` +
+                `FIX: Use \`flutter_stop\` then \`flutter_run\`.`,
+            },
+          ],
+          details: {
+            running: true as const,
+            connected: false as const,
+            pid: devicePid,
+            fuckery: "disconnected_process",
+          },
+        };
+      }
+
+      // Case C: Healthy tracked process
+      if (trackedProcessHealthy) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `✅ Flutter app is running\n\nVM Service: ${s.flutterProcess!.vmServiceUrl}\nPID on device: ${devicePid || "unknown"}`,
+            },
+          ],
+          details: { running: true as const, vmServiceUrl: s.flutterProcess!.vmServiceUrl, pid: devicePid },
+        };
+      }
+
+      // ── END FUCKERY DETECTION ──────────────────────────────────────
 
       // Check 3: Crash log
       try {
@@ -929,7 +1029,7 @@ export default function (pi: ExtensionAPI) {
         /* logcat not available */
       }
 
-      // Check 4: General logcat for recent death of the package — also parse OOM info
+      // Check 4: General logcat for recent death of the package
       if (packageName) {
         try {
           const deathResult = await pi.exec(
