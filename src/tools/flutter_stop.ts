@@ -9,11 +9,13 @@ export function createFlutterStopTool(state: ExtensionState) {
     parameters: Type.Object({}),
     async execute() {
       if (!state.flutterProcess) {
-        return { content: [{ type: "text" as const, text: "Flutter app is not running." }], details: {} };
+        // @ts-ignore - type literal inferred by registerTool
+        return { content: [{ type: "text", text: "Flutter app is not running." }], details: {} };
       }
       state.flutterProcess.kill();
       state.flutterProcess = null;
       state.flutterOutput = "";
+      // @ts-ignore - type literal inferred by registerTool
       return { content: [{ type: "text", text: "Stopped Flutter process." }], details: {} };
     },
   };

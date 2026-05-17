@@ -27,25 +27,54 @@ import {
 import { parseAdbDevices, isEmulatorSerial } from "./common/emulator.js";
 import { walkAccessibilityTree, detectTextFieldIssues, filterLabels, formatLabelsOutput } from "./common/semantics.js";
 import { findFlutterProjects } from "./common/project-discovery.js";
+import { TrackedFlutterProcess, type ExtensionState } from "./state.js";
+import { createFlutterStopTool } from "./tools/flutter_stop.js";
+import { createFlutterHotReloadTool } from "./tools/flutter_hot_reload.js";
+import { createFlutterHotRestartTool } from "./tools/flutter_hot_restart.js";
+import { createMaestroTestFileTool } from "./tools/maestro_test_file.js";
+import { createFlutterInspectTreeTool } from "./tools/flutter_inspect_tree.js";
+import { createFlutterScreenshotTool } from "./tools/flutter_screenshot.js";
+import { createFlutterCurrentScreenTool } from "./tools/flutter_current_screen.js";
 
-// Extend ChildProcess to carry vmServiceUrl
-interface TrackedFlutterProcess extends ChildProcess {
-  vmServiceUrl?: string;
+// TrackedFlutterProcess imported from ./state.js
+
+function createStateBridge(
+  pi: ExtensionAPI,
+  s: {
+    flutterProcess: TrackedFlutterProcess | null;
+    flutterOutput: string;
+    savedDevice: SavedDevice | null;
+    launchedEmulator: string | null;
+    selectedProject: FlutterProject | null;
+    activeSessionId: string | null;
+  },
+): ExtensionState {
+  return new Proxy(s, {
+    get(_target, prop) {
+      if (prop === "pi") return pi;
+      return (s as any)[prop];
+    },
+    set(target, prop, value) {
+      (target as any)[prop] = value;
+      return true;
+    },
+  }) as ExtensionState;
 }
 
 export default function (pi: ExtensionAPI) {
-  let flutterProcess: TrackedFlutterProcess | null = null;
-  let flutterOutput = "";
-
-  let savedDevice: SavedDevice | null = null;
-  let launchedEmulator: string | null = null;
-
-  let selectedProject: FlutterProject | null = null;
-  let activeSessionId: string | null = null;
+  const s = {
+    flutterProcess: null as TrackedFlutterProcess | null,
+    flutterOutput: "",
+    savedDevice: null as SavedDevice | null,
+    launchedEmulator: null as string | null,
+    selectedProject: null as FlutterProject | null,
+    activeSessionId: null as string | null,
+  };
+  const state = createStateBridge(pi, s);
 
   function resolveProject(cwd: string): FlutterProject {
-    if (selectedProject && existsSync(join(selectedProject.path, "pubspec.yaml"))) {
-      return selectedProject;
+    if (s.selectedProject && existsSync(join(s.selectedProject.path, "pubspec.yaml"))) {
+      return s.selectedProject;
     }
 
     const all = findFlutterProjects(cwd);
@@ -59,9 +88,9 @@ export default function (pi: ExtensionAPI) {
     }
 
     if (all.length === 1) {
-      selectedProject = all[0];
-      saveProjectConfig(cwd, selectedProject);
-      return selectedProject;
+      s.selectedProject = all[0];
+      saveProjectConfig(cwd, s.selectedProject);
+      return s.selectedProject;
     }
 
     throw new Error(
@@ -74,49 +103,49 @@ export default function (pi: ExtensionAPI) {
   // ── Session hooks ──────────────────────────────────────────────────
   pi.on("session_start", async (event, ctx) => {
     // @ts-ignore - sessionId exists at runtime
-    activeSessionId = event.sessionId;
+    s.activeSessionId = event.sessionId;
     const device = loadDeviceConfig(ctx.cwd);
     if (device) {
-      savedDevice = device;
+      s.savedDevice = device;
       if (device.type === "ip") {
         await pi.exec("adb", ["connect", device.id]);
       }
     }
     const project = loadProjectConfig(ctx.cwd);
     if (project && existsSync(join(project.path, "pubspec.yaml"))) {
-      selectedProject = project;
+      s.selectedProject = project;
     }
     // Re-detect running emulator after reload
-    if (savedDevice?.type === "emulator") {
-      const running = await findRunningEmulator(savedDevice.name || "");
+    if (s.savedDevice?.type === "emulator") {
+      const running = await findRunningEmulator(s.savedDevice.name || "");
       if (running) {
-        launchedEmulator = running.serial;
+        s.launchedEmulator = running.serial;
         // Update savedDevice in case serial changed (e.g., emulator restarted on different port)
-        savedDevice = { id: running.serial, type: "emulator", name: running.avdName };
+        s.savedDevice = { id: running.serial, type: "emulator", name: running.avdName };
       }
     }
   });
 
   pi.on("session_shutdown", async (event) => {
-    activeSessionId = null;
-    if (event.reason === "reload" && flutterProcess) {
-      flutterProcess = null;
-      flutterOutput = "";
-    } else if (event.reason !== "reload" && flutterProcess) {
-      flutterProcess.kill();
-      flutterProcess = null;
+    s.activeSessionId = null;
+    if (event.reason === "reload" && s.flutterProcess) {
+      s.flutterProcess = null;
+      s.flutterOutput = "";
+    } else if (event.reason !== "reload" && s.flutterProcess) {
+      s.flutterProcess.kill();
+      s.flutterProcess = null;
     }
-    if (event.reason !== "reload" && launchedEmulator) {
+    if (event.reason !== "reload" && s.launchedEmulator) {
       try {
-        await pi.exec("adb", ["-s", launchedEmulator, "emu", "kill"], { timeout: 5000 });
+        await pi.exec("adb", ["-s", s.launchedEmulator, "emu", "kill"], { timeout: 5000 });
       } catch {
         /* ignore shutdown errors */
       }
-      launchedEmulator = null;
+      s.launchedEmulator = null;
     }
-    if (event.reason !== "reload" && savedDevice?.type === "ip") {
+    if (event.reason !== "reload" && s.savedDevice?.type === "ip") {
       try {
-        await pi.exec("adb", ["disconnect", savedDevice.id], { timeout: 5000 });
+        await pi.exec("adb", ["disconnect", s.savedDevice.id], { timeout: 5000 });
       } catch {
         /* ignore shutdown errors */
       }
@@ -268,7 +297,7 @@ export default function (pi: ExtensionAPI) {
           ctx.ui.notify(`No project matching "${args.trim()}". Available:\n${list}`, "error");
           return;
         }
-        selectedProject = match;
+        s.selectedProject = match;
         saveProjectConfig(ctx.cwd, match);
         ctx.ui.notify(`Selected Flutter project: ${match.name} (${match.relPath})`, "info");
         return;
@@ -279,7 +308,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      const current = selectedProject;
+      const current = s.selectedProject;
       const list = projects
         .map((p) => {
           const marker = current?.path === p.path ? " ▶ selected" : "";
@@ -313,8 +342,8 @@ export default function (pi: ExtensionAPI) {
           } catch {
             /* couldn't read AVD name */
           }
-          savedDevice = { id: targetId, type: "emulator", name: avdName };
-          saveDeviceConfig(ctx.cwd, savedDevice);
+          s.savedDevice = { id: targetId, type: "emulator", name: avdName };
+          saveDeviceConfig(ctx.cwd, s.savedDevice);
           ctx.ui.notify(`✅ Emulator already connected: ${targetId}${avdName ? ` (${avdName})` : ""}`, "info");
           return;
         }
@@ -329,9 +358,9 @@ export default function (pi: ExtensionAPI) {
         // Check if this AVD is already running
         const alreadyRunning = await findRunningEmulator(avdName);
         if (alreadyRunning) {
-          savedDevice = { id: alreadyRunning.serial, type: "emulator", name: alreadyRunning.avdName };
-          launchedEmulator = alreadyRunning.serial;
-          saveDeviceConfig(ctx.cwd, savedDevice);
+          s.savedDevice = { id: alreadyRunning.serial, type: "emulator", name: alreadyRunning.avdName };
+          s.launchedEmulator = alreadyRunning.serial;
+          saveDeviceConfig(ctx.cwd, s.savedDevice);
           ctx.ui.notify(`✅ Emulator already running: ${alreadyRunning.serial} (${alreadyRunning.avdName})`, "info");
           return;
         }
@@ -360,9 +389,9 @@ export default function (pi: ExtensionAPI) {
               timeout: 5000,
             });
             if (booted.stdout.trim() === "1") {
-              savedDevice = { id: running.serial, type: "emulator", name: running.avdName };
-              launchedEmulator = running.serial;
-              saveDeviceConfig(ctx.cwd, savedDevice);
+              s.savedDevice = { id: running.serial, type: "emulator", name: running.avdName };
+              s.launchedEmulator = running.serial;
+              saveDeviceConfig(ctx.cwd, s.savedDevice);
               ctx.ui.notify(`✅ Emulator booted: ${running.serial} (${running.avdName})`, "info");
               return;
             }
@@ -377,8 +406,8 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(`Connection failed: ${result.stdout}`, "error");
         return;
       }
-      savedDevice = { id: targetId, type: "ip" };
-      saveDeviceConfig(ctx.cwd, savedDevice);
+      s.savedDevice = { id: targetId, type: "ip" };
+      saveDeviceConfig(ctx.cwd, s.savedDevice);
       ctx.ui.notify(`✅ Connected: ${targetId}`, "info");
     },
   });
@@ -386,29 +415,29 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("flutter-disconnect", {
     description: "Disconnect from the current device",
     handler: async (_args, ctx) => {
-      if (!savedDevice) {
+      if (!s.savedDevice) {
         ctx.ui.notify("No device to disconnect.", "warning");
         return;
       }
 
-      if (launchedEmulator) {
+      if (s.launchedEmulator) {
         try {
-          await pi.exec("adb", ["-s", launchedEmulator, "emu", "kill"], { timeout: 5000 });
+          await pi.exec("adb", ["-s", s.launchedEmulator, "emu", "kill"], { timeout: 5000 });
         } catch {
           /* ignore error */
         }
-        ctx.ui.notify(`Killed emulator ${launchedEmulator}`, "info");
-        launchedEmulator = null;
-      } else if (savedDevice.type === "ip") {
+        ctx.ui.notify(`Killed emulator ${s.launchedEmulator}`, "info");
+        s.launchedEmulator = null;
+      } else if (s.savedDevice.type === "ip") {
         try {
-          await pi.exec("adb", ["disconnect", savedDevice.id], { timeout: 5000 });
+          await pi.exec("adb", ["disconnect", s.savedDevice.id], { timeout: 5000 });
         } catch {
           /* ignore error */
         }
-        ctx.ui.notify(`Disconnected ${savedDevice.id}`, "info");
+        ctx.ui.notify(`Disconnected ${s.savedDevice.id}`, "info");
       }
 
-      savedDevice = null;
+      s.savedDevice = null;
       saveDeviceConfig(ctx.cwd, null);
     },
   });
@@ -444,8 +473,8 @@ export default function (pi: ExtensionAPI) {
           } catch {
             /* couldn't read AVD name */
           }
-          savedDevice = { id: targetId, type: "emulator", name: avdName };
-          saveDeviceConfig(cwd, savedDevice);
+          s.savedDevice = { id: targetId, type: "emulator", name: avdName };
+          saveDeviceConfig(cwd, s.savedDevice);
           return {
             content: [
               {
@@ -466,8 +495,8 @@ export default function (pi: ExtensionAPI) {
         // Check if this specific AVD is already running
         const alreadyRunning = await findRunningEmulator(avdName);
         if (alreadyRunning) {
-          savedDevice = { id: alreadyRunning.serial, type: "emulator", name: alreadyRunning.avdName };
-          saveDeviceConfig(cwd, savedDevice);
+          s.savedDevice = { id: alreadyRunning.serial, type: "emulator", name: alreadyRunning.avdName };
+          saveDeviceConfig(cwd, s.savedDevice);
           return {
             content: [
               {
@@ -510,9 +539,9 @@ export default function (pi: ExtensionAPI) {
               signal,
             });
             if (booted.stdout.trim() === "1") {
-              savedDevice = { id: running.serial, type: "emulator", name: running.avdName };
-              launchedEmulator = running.serial;
-              saveDeviceConfig(cwd, savedDevice);
+              s.savedDevice = { id: running.serial, type: "emulator", name: running.avdName };
+              s.launchedEmulator = running.serial;
+              saveDeviceConfig(cwd, s.savedDevice);
               return {
                 content: [
                   {
@@ -533,8 +562,8 @@ export default function (pi: ExtensionAPI) {
       if (result.code !== 0 || result.stdout.includes("failed")) {
         throw new Error(`ADB connection failed:\n${result.stdout}`);
       }
-      savedDevice = { id: targetId, type: "ip" };
-      saveDeviceConfig(cwd, savedDevice);
+      s.savedDevice = { id: targetId, type: "ip" };
+      saveDeviceConfig(cwd, s.savedDevice);
       return {
         content: [{ type: "text", text: `✅ Connected: \`${targetId}\`\nSaved as default device.` }],
         details: { device: targetId },
@@ -549,21 +578,21 @@ export default function (pi: ExtensionAPI) {
       "Disconnect from the current ADB device. Kills launched emulators, disconnects network devices, clears saved preference.",
     parameters: Type.Object({}),
     async execute(_, __, signal, ____, ctx) {
-      if (!savedDevice) {
+      if (!s.savedDevice) {
         return { content: [{ type: "text", text: "No saved device to disconnect from." }], details: {} };
       }
 
-      const device = savedDevice;
+      const device = s.savedDevice;
       const lines: string[] = [];
 
-      if (launchedEmulator) {
+      if (s.launchedEmulator) {
         try {
-          await pi.exec("adb", ["-s", launchedEmulator, "emu", "kill"], { timeout: 5000, signal });
-          lines.push(`✅ Killed emulator \`${launchedEmulator}\``);
+          await pi.exec("adb", ["-s", s.launchedEmulator, "emu", "kill"], { timeout: 5000, signal });
+          lines.push(`✅ Killed emulator \`${s.launchedEmulator}\``);
         } catch {
-          lines.push(`⚠️ Failed to kill emulator \`${launchedEmulator}\` (already dead or ADB error).`);
+          lines.push(`⚠️ Failed to kill emulator \`${s.launchedEmulator}\` (already dead or ADB error).`);
         }
-        launchedEmulator = null;
+        s.launchedEmulator = null;
       }
 
       if (device.type === "ip") {
@@ -573,11 +602,11 @@ export default function (pi: ExtensionAPI) {
         } catch {
           lines.push(`⚠️ Failed to disconnect \`${device.id}\` (ADB error).`);
         }
-      } else if (device.type === "emulator" && !launchedEmulator) {
+      } else if (device.type === "emulator" && !s.launchedEmulator) {
         lines.push(`ℹ️ Emulator \`${device.id}\` was not launched by this session — left running.`);
       }
 
-      savedDevice = null;
+      s.savedDevice = null;
       saveDeviceConfig(ctx.cwd, null);
 
       return {
@@ -599,10 +628,10 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const project = resolveProject(ctx.cwd);
-      const targetDevice = params.device || savedDevice?.id;
-      const currentSessionId = activeSessionId;
+      const targetDevice = params.device || s.savedDevice?.id;
+      const currentSessionId = s.activeSessionId;
 
-      if (flutterProcess) {
+      if (s.flutterProcess) {
         throw new Error("Flutter is already running. Use flutter_hot_reload or flutter_stop first.");
       }
 
@@ -626,12 +655,12 @@ export default function (pi: ExtensionAPI) {
       const args = [verb, ...(targetDevice ? ["-d", targetDevice] : []), ...(params.args || [])];
       const commandLabel = `flutter ${args.join(" ")}`;
 
-      flutterOutput = "";
+      s.flutterOutput = "";
       const proc = spawn("flutter", args, {
         cwd: project.path,
         stdio: ["pipe", "pipe", "pipe"],
       }) as TrackedFlutterProcess;
-      flutterProcess = proc;
+      s.flutterProcess = proc;
       let started = false;
       let buildFailed = false;
       let lastProgressTime = Date.now();
@@ -654,10 +683,10 @@ export default function (pi: ExtensionAPI) {
       ];
 
       proc.stdout?.on("data", (data: Buffer) => {
-        if (activeSessionId !== currentSessionId || proc !== flutterProcess) return;
+        if (s.activeSessionId !== currentSessionId || proc !== s.flutterProcess) return;
         const str = data.toString();
-        flutterOutput += str;
-        if (flutterOutput.length > 200_000) flutterOutput = flutterOutput.slice(-100_000);
+        s.flutterOutput += str;
+        if (s.flutterOutput.length > 200_000) s.flutterOutput = s.flutterOutput.slice(-100_000);
 
         // Detect build failures before the app starts
         if (!started && !buildFailed) {
@@ -667,9 +696,9 @@ export default function (pi: ExtensionAPI) {
               pi.sendMessage(
                 {
                   customType: "run_failed",
-                  content: `❌ Flutter build failed\n\n${flutterOutput.slice(-4000)}`,
+                  content: `❌ Flutter build failed\n\n${s.flutterOutput.slice(-4000)}`,
                   display: true,
-                  details: { exitCode: 1, started: false, logs: flutterOutput.slice(-2000), stage: "build" },
+                  details: { exitCode: 1, started: false, logs: s.flutterOutput.slice(-2000), stage: "build" },
                 },
                 { deliverAs: "followUp", triggerTurn: true },
               );
@@ -704,9 +733,9 @@ export default function (pi: ExtensionAPI) {
             pi.sendMessage(
               {
                 customType: "run_progress",
-                content: `App starting…\n\n${flutterOutput.slice(-2000)}`,
+                content: `App starting…\n\n${s.flutterOutput.slice(-2000)}`,
                 display: true,
-                details: { bytesOutput: flutterOutput.length },
+                details: { bytesOutput: s.flutterOutput.length },
               },
               { deliverAs: "steer" },
             );
@@ -715,24 +744,24 @@ export default function (pi: ExtensionAPI) {
       });
 
       proc.stderr?.on("data", (data: Buffer) => {
-        if (activeSessionId !== currentSessionId || proc !== flutterProcess) return;
+        if (s.activeSessionId !== currentSessionId || proc !== s.flutterProcess) return;
         const str = data.toString();
-        flutterOutput += str;
-        if (flutterOutput.length > 200_000) flutterOutput = flutterOutput.slice(-100_000);
+        s.flutterOutput += str;
+        if (s.flutterOutput.length > 200_000) s.flutterOutput = s.flutterOutput.slice(-100_000);
       });
 
       proc.on("exit", (code) => {
-        if (activeSessionId !== currentSessionId || proc !== flutterProcess) return;
-        flutterProcess = null;
+        if (s.activeSessionId !== currentSessionId || proc !== s.flutterProcess) return;
+        s.flutterProcess = null;
         if (!started) {
           // Don't send another run_failed if we already sent one for build failure
           if (!buildFailed) {
             pi.sendMessage(
               {
                 customType: "run_failed",
-                content: `❌ Flutter run exited before app started (code ${code}).\n\n${flutterOutput.slice(-4000)}`,
+                content: `❌ Flutter run exited before app started (code ${code}).\n\n${s.flutterOutput.slice(-4000)}`,
                 display: true,
-                details: { exitCode: code, started: false, logs: flutterOutput.slice(-1000) },
+                details: { exitCode: code, started: false, logs: s.flutterOutput.slice(-1000) },
               },
               { deliverAs: "followUp", triggerTurn: true },
             );
@@ -742,9 +771,9 @@ export default function (pi: ExtensionAPI) {
           pi.sendMessage(
             {
               customType: "run_stopped",
-              content: `${isCrash ? "❌" : "⏹️"} Flutter app stopped (exit code ${code}).${isCrash ? `\n\nLast logs:\n${flutterOutput.slice(-500)}` : ""}`,
+              content: `${isCrash ? "❌" : "⏹️"} Flutter app stopped (exit code ${code}).${isCrash ? `\n\nLast logs:\n${s.flutterOutput.slice(-500)}` : ""}`,
               display: true,
-              details: { exitCode: code, started: true, logs: flutterOutput.slice(-1000) },
+              details: { exitCode: code, started: true, logs: s.flutterOutput.slice(-1000) },
             },
             { deliverAs: "followUp", triggerTurn: true },
           );
@@ -752,8 +781,8 @@ export default function (pi: ExtensionAPI) {
       });
 
       signal?.addEventListener("abort", () => {
-        flutterProcess?.kill();
-        flutterProcess = null;
+        s.flutterProcess?.kill();
+        s.flutterProcess = null;
       });
 
       return {
@@ -768,351 +797,29 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
-    name: "flutter_stop",
-    label: "Flutter Stop",
-    description: "Stop the running Flutter app",
-    parameters: Type.Object({}),
-    async execute() {
-      if (!flutterProcess) {
-        return { content: [{ type: "text", text: "Flutter app is not running." }], details: {} };
-      }
-      flutterProcess.kill();
-      flutterProcess = null;
-      flutterOutput = "";
-      return { content: [{ type: "text", text: "Stopped Flutter process." }], details: {} };
-    },
-  });
+  // @ts-ignore - extracted tool type inference
+  pi.registerTool(createFlutterStopTool(state));
 
-  pi.registerTool({
-    name: "flutter_hot_reload",
-    label: "Flutter Hot Reload",
-    description: "Trigger a hot reload of the running Flutter app",
-    parameters: Type.Object({}),
-    async execute() {
-      if (!flutterProcess || !flutterProcess.stdin) {
-        throw new Error("Flutter app is not running.");
-      }
-      flutterProcess.stdin.write("r");
-      return { content: [{ type: "text", text: "Sent hot reload command ('r') to Flutter process." }], details: {} };
-    },
-  });
+  // @ts-ignore - extracted tool type inference
+  pi.registerTool(createFlutterHotReloadTool(state));
 
-  pi.registerTool({
-    name: "flutter_hot_restart",
-    label: "Flutter Hot Restart",
-    description: "Trigger a hot restart of the running Flutter app",
-    parameters: Type.Object({}),
-    async execute() {
-      if (!flutterProcess || !flutterProcess.stdin) {
-        throw new Error("Flutter app is not running.");
-      }
-      flutterProcess.stdin.write("R");
-      return { content: [{ type: "text", text: "Sent hot restart command ('R') to Flutter process." }], details: {} };
-    },
-  });
-
-  // ── VM Service helper (for inspect tools) ──────────────────────────
-  async function callVmService(
-    method: string,
-    callParams: Record<string, unknown> = {},
-    cwd: string,
-  ): Promise<{ content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> }> {
-    if (!flutterProcess?.vmServiceUrl) {
-      throw new Error("VM Service URL not found. Is the app running?");
-    }
-
-    const script = `
-const WebSocket = require('ws');
-const url = '${flutterProcess.vmServiceUrl.replace("http", "ws")}ws';
-let retries = 0;
-const maxRetries = 10;
-function connect() {
-  const ws = new WebSocket(url);
-  ws.on('open', () => {
-    ws.send(JSON.stringify({ jsonrpc: '2.0', id: '1', method: 'getVM' }));
-  });
-  ws.on('message', (data) => {
-    const resp = JSON.parse(data.toString());
-    if (resp.id === '1') {
-      const isolateId = resp.result.isolates[0].id;
-      ws.send(JSON.stringify({
-        jsonrpc: '2.0',
-        id: '2',
-        method: '${method}',
-        params: { isolateId, ...${JSON.stringify(callParams)} }
-      }));
-    } else if (resp.id === '2') {
-      if (resp.result && resp.result.data !== undefined) {
-          console.log(resp.result.data);
-      } else if (resp.result && resp.result.result) {
-          console.log(resp.result.result);
-      } else {
-          console.log(JSON.stringify(resp.result || resp.error));
-      }
-      ws.close();
-      process.exit(0);
-    }
-  });
-  ws.on('error', (e) => {
-    retries++;
-    if (retries < maxRetries) {
-      console.error('Retry ' + retries + '/' + maxRetries + ': ' + e.message);
-      setTimeout(connect, 1000);
-    } else {
-      console.error('Connection failed after ' + maxRetries + ' retries: ' + e.message);
-      process.exit(1);
-    }
-  });
-}
-connect();
-setTimeout(() => { console.error('Timeout'); process.exit(1); }, 15000);
-      `;
-
-    const tempFile = join(cwd, `.pi`, `vm_call_${Date.now()}.js`);
-    mkdirSync(join(cwd, `.pi`), { recursive: true });
-    writeFileSync(tempFile, script);
-    try {
-      const result = await pi.exec("node", [tempFile], { timeout: 20000 });
-      if (result.code !== 0) {
-        const output = [result.stdout, result.stderr].filter(Boolean).join("\n");
-        throw new Error(`VM call failed (exit ${result.code}):\n${output.trim()}`);
-      }
-      return {
-        content: [{ type: "text", text: result.stdout }],
-        details: { code: result.code },
-      };
-    } finally {
-      try {
-        unlinkSync(tempFile);
-      } catch {
-        /* ignore */
-      }
-    }
-  }
+  // @ts-ignore - extracted tool type inference
+  pi.registerTool(createFlutterHotRestartTool(state));
 
   // ── Maestro Temp File ───────────────────────────────────────────────
 
-  pi.registerTool({
-    name: "maestro_test_file",
-    label: "Maestro Test File",
-    description:
-      "Create a temp YAML file for maestro test flows. Returns the path for writing. All maestro test ephemera lives in .pi/tmp/ so it stays together and is garbage-collectable. Use this instead of bare /tmp/ files or writing YAML to the project root.",
-    parameters: Type.Object({
-      name: Type.String({
-        description:
-          "Short name for the test (e.g. 'tap-increment', 'form-submit'). Used in filename: maestro-<name>.yaml",
-      }),
-      content: Type.Optional(
-        Type.String({
-          description: "YAML content. If provided, writes the file directly and skips the write-then-run pattern.",
-        }),
-      ),
-    }),
-    async execute(_, params, __, ___, ctx) {
-      const sanitized =
-        params.name
-          .replace(/[^a-zA-Z0-9_-]/g, "-")
-          .replace(/-+/g, "-")
-          .replace(/^-|-$/g, "") || "flow";
-      const filename = `maestro-${sanitized}.yaml`;
-      const tmpDir = join(ctx.cwd, ".pi", "tmp");
-      mkdirSync(tmpDir, { recursive: true });
-      const filepath = join(tmpDir, filename);
-
-      if (params.content) {
-        writeFileSync(filepath, params.content, "utf-8");
-        return {
-          content: [
-            { type: "text", text: `Wrote maestro test to \`${filepath}\`.\n\nRun: \`maestro test ${filepath}\`` },
-          ],
-          details: { path: filepath, written: true },
-        };
-      }
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Temp file path: \`${filepath}\`\n\nWrite your YAML content here, then run \`maestro test ${filepath}\`."`,
-          },
-        ],
-        details: { path: filepath, written: false },
-      };
-    },
-  });
+  // @ts-ignore - extracted tool type inference
+  pi.registerTool(createMaestroTestFileTool(state));
 
   // ── Inspect & Debug Tools ───────────────────────────────────────────
 
-  // @ts-ignore - TypeBox callback inference mismatch
-  pi.registerTool({
-    name: "flutter_inspect_tree",
-    label: "Flutter Inspect Tree",
-    description:
-      "Inspect Flutter widget tree. Default: compact list of semantics labels (safe for context). Use search to filter by label text. Use full=true for raw VM service tree dump (very large, use only when needed).",
-    parameters: Type.Object({
-      search: Type.Optional(Type.String({ description: "Filter to widgets whose semantics label contains this text" })),
-      full: Type.Optional(
-        Type.Boolean({
-          description:
-            "Get the raw VM service widget tree dump. WARNING: this produces kilobytes of output. Only use when you need internal Flutter widget details, not for finding labels or testing.",
-        }),
-      ),
-    }),
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      // Full tree via VM service — only when explicitly requested
-      // Truncate to last 50 lines (tail) — the head is Flutter framework plumbing
-      // (MediaQuery, FocusScope, Theme, Navigator) while the tail has actual UI widgets.
-      if (params.full) {
-        const full = await callVmService("ext.flutter.debugDumpApp", {}, ctx.cwd);
-        const allLines = full.content[0].text.split("\n");
-        const totalLines = allLines.length;
-        const MAX_LINES = 50;
-        if (allLines.length > MAX_LINES) {
-          const tail = allLines.slice(-MAX_LINES).join("\n");
-          full.content[0].text = `... (showing last ${MAX_LINES} of ${totalLines} lines; head is Flutter framework plumbing)\n${tail}`;
-          full.details.totalLines = totalLines;
-        }
-        return full;
-      }
+  // @ts-ignore - extracted tool type inference
+  pi.registerTool(createFlutterInspectTreeTool(state));
+  // @ts-ignore - extracted tool type inference
+  pi.registerTool(createFlutterScreenshotTool(state));
 
-      // Default: compact semantics labels via maestro hierarchy
-      // Note: maestro hierarchy auto-detects the connected ADB device; --device is not supported
-      const result = await pi.exec("maestro", ["hierarchy"], { timeout: 30000, signal });
-      if (result.code !== 0) {
-        throw new Error(`maestro hierarchy failed (exit ${result.code}):\n${result.stdout}`);
-      }
-
-      let tree: Record<string, unknown>;
-      try {
-        // Maestro prefixes output with "Running on <device>\n" before the JSON — strip it
-        const jsonStart = result.stdout.indexOf("{");
-        const jsonStr = jsonStart >= 0 ? result.stdout.slice(jsonStart) : result.stdout;
-        tree = JSON.parse(jsonStr) as Record<string, unknown>;
-      } catch {
-        throw new Error(`Failed to parse maestro hierarchy JSON:\n${result.stdout.slice(0, 500)}`);
-      }
-
-      // Use extracted semantics parsing (tested in common/semantics.test.ts)
-      const labels = walkAccessibilityTree(tree);
-      const textFieldIssues = detectTextFieldIssues(tree);
-
-      const filtered = filterLabels(labels, params.search || "");
-
-      const output = formatLabelsOutput(filtered, labels.length, textFieldIssues);
-
-      return {
-        content: [{ type: "text", text: output }],
-        details: { count: filtered.length, total: labels.length, textFieldIssues: textFieldIssues.length },
-      };
-    },
-  });
-
-  // @ts-ignore - TypeBox mixed content types
-  pi.registerTool({
-    name: "flutter_screenshot",
-    label: "Flutter Screenshot",
-    description: "Take a screenshot of the current device screen. Returns the image path.",
-    parameters: Type.Object({
-      timeoutMs: Type.Optional(
-        Type.Number({
-          description:
-            "Maximum time in milliseconds to wait for the screenshot. Default 10000. Increase for remote devices over slow links.",
-        }),
-      ),
-    }),
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const screenshotTimeout = params.timeoutMs || 10000;
-      const tmpDir = join(ctx.cwd, ".pi", "tmp");
-      mkdirSync(tmpDir, { recursive: true });
-      const filename = `screenshot_${Date.now()}.png`;
-      const outputPath = join(tmpDir, filename);
-
-      const targetDevice = savedDevice?.id;
-      const adbArgs = targetDevice
-        ? ["-s", targetDevice, "exec-out", "screencap", "-p"]
-        : ["exec-out", "screencap", "-p"];
-
-      return new Promise((resolve, reject) => {
-        const proc = spawn("adb", adbArgs);
-        const chunks: Buffer[] = [];
-        let stderr = "";
-
-        const timeout = setTimeout(() => {
-          proc.kill();
-          reject(new Error(`Screenshot timed out after ${Math.round(screenshotTimeout / 1000)} seconds.`));
-        }, screenshotTimeout);
-
-        proc.stdout.on("data", (chunk) => {
-          chunks.push(chunk);
-        });
-
-        proc.stderr.on("data", (data) => {
-          stderr += data.toString();
-        });
-
-        proc.on("close", (code) => {
-          clearTimeout(timeout);
-          if (code !== 0) {
-            reject(new Error(`Screenshot failed (exit ${code}):\n${stderr}`));
-            return;
-          }
-          try {
-            const buffer = Buffer.concat(chunks);
-            if (buffer.length === 0) {
-              reject(new Error("Screenshot failed: received empty output from adb"));
-              return;
-            }
-            writeFileSync(outputPath, buffer);
-            resolve({
-              content: [
-                {
-                  type: "text" as const,
-                  text: `Screenshot saved to \`${relative(ctx.cwd, outputPath)}\`. Use the \`read\` tool to analyze it.`,
-                },
-              ],
-              details: { path: outputPath },
-            });
-          } catch (err) {
-            reject(err);
-          }
-        });
-
-        proc.on("error", (err) => {
-          clearTimeout(timeout);
-          reject(err);
-        });
-
-        if (signal) {
-          signal.addEventListener("abort", () => {
-            clearTimeout(timeout);
-            proc.kill();
-          });
-        }
-      });
-    },
-  });
-
-  pi.registerTool({
-    name: "flutter_current_screen",
-    label: "Flutter Current Screen",
-    description: "Get the current activity/screen visible on the device. Returns a single line with the activity name.",
-    parameters: Type.Object({}),
-    async execute(_, __, signal) {
-      const result = await pi.exec("adb", ["shell", "dumpsys", "activity", "top"], { timeout: 10000, signal });
-      if (result.code !== 0) {
-        throw new Error(`dumpsys activity failed (exit ${result.code}):\n${result.stdout}`);
-      }
-
-      const match = result.stdout.match(/ACTIVITY\s+(.+?)\s+/);
-      const activity = match?.[1] || "Unknown";
-
-      return {
-        content: [{ type: "text", text: `Current screen: \`${activity}\`` }],
-        details: { activity },
-      };
-    },
-  });
+  // @ts-ignore - extracted tool type inference
+  pi.registerTool(createFlutterCurrentScreenTool(state));
 
   // @ts-ignore - TypeBox union details
   pi.registerTool({
@@ -1136,22 +843,22 @@ setTimeout(() => { console.error('Timeout'); process.exit(1); }, 15000);
       }
 
       // Pre-flight: check if device is connected
-      if (savedDevice) {
-        const connected = await isAdbDeviceConnected(savedDevice.id);
+      if (s.savedDevice) {
+        const connected = await isAdbDeviceConnected(s.savedDevice.id);
         if (!connected) {
           return {
-            content: [{ type: "text" as const, text: `⚠️ Device \`${savedDevice.id}\` is disconnected.` }],
+            content: [{ type: "text" as const, text: `⚠️ Device \`${s.savedDevice.id}\` is disconnected.` }],
             details: { running: false as const, connected: false as const },
           };
         }
       }
 
       // Check 1: Is the tracked flutter process still alive with a valid VM Service URL?
-      if (flutterProcess && flutterProcess.vmServiceUrl && !flutterProcess.killed) {
+      if (s.flutterProcess && s.flutterProcess.vmServiceUrl && !s.flutterProcess.killed) {
         // Verify VM Service is actually reachable (check from host)
         try {
-          const vmHost = flutterProcess.vmServiceUrl.replace("http://", "").split(":")[0];
-          const vmPort = flutterProcess.vmServiceUrl.replace("http://", "").split(":")[1]?.split("/")[0];
+          const vmHost = s.flutterProcess.vmServiceUrl.replace("http://", "").split(":")[0];
+          const vmPort = s.flutterProcess.vmServiceUrl.replace("http://", "").split(":")[1]?.split("/")[0];
           if (vmHost && vmPort) {
             const pingResult = await pi.exec("curl", ["--max-time", "3", "-s", `http://${vmHost}:${vmPort}/json`], {
               timeout: budget(0.2),
@@ -1162,10 +869,10 @@ setTimeout(() => { console.error('Timeout'); process.exit(1); }, 15000);
                 content: [
                   {
                     type: "text" as const,
-                    text: `✅ Flutter app is running\n\nVM Service: ${flutterProcess.vmServiceUrl}`,
+                    text: `✅ Flutter app is running\n\nVM Service: ${s.flutterProcess.vmServiceUrl}`,
                   },
                 ],
-                details: { running: true as const, vmServiceUrl: flutterProcess.vmServiceUrl },
+                details: { running: true as const, vmServiceUrl: s.flutterProcess.vmServiceUrl },
               };
             }
           }
