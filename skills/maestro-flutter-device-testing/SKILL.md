@@ -293,7 +293,43 @@ When `flutter_inspect_tree()` reports `⚠️ hint-only` warnings, `undefined` w
 
 ## Fire TV / Android TV Quirks
 
+### Maestro Test Flow Pattern (Fire TV)
+
+Maestro tests on Fire TV follow this pattern — do NOT use `tapOn` with text or `id:` selectors:
+
+```yaml
+appId: com.lansite.firetv
+---
+# Navigate with Remote Dpad keys
+- pressKey: "Remote Dpad Right"
+- pressKey: "Remote Dpad Down"
+- pressKey: "Remote Dpad Center"
+
+# Assert with plain text matching
+- assertVisible: "Welcome, dev"
+- assertVisible: "Search movies and shows"
+
+# Use back key for navigation
+- pressKey: back
+```
+
+**Critical rules:**
+- **ALWAYS use `pressKey: "Remote Dpad ..."` for navigation** — never `tapOn` for D-pad movement. Remote Dpad keys are slow (3–10s each) but reliable.
+- **`assertVisible` uses accessibility text, not widget text**: Flutter `Text` widgets with `Semantics` wrappers expose text that Maestro can match. Plain `Text()` widgets without semantics may not be matchable.
+- **`Semantics(identifier:)` does NOT produce a `resource-id`**: On Fire TV, the identifier appears in `accessibilityText` — Maestro cannot match it with `id:` selector. Use text matching instead.
+- **Maestro test timeout on physical devices**: Use minimum 120s for `bash timeout=` on full flows.
+- **Screenshot verification is essential**: Many UI bugs are visual-only (focus highlights, layout overflow, subtitle rendering). A screenshot-capable model is needed for end-to-end TV testing because Maestro's `assertVisible` can't verify visual quality.
+
+### ADB / Device Quirks
+
 - **`flutter_current_screen()` on Fire TV**: The tool now queries `mResumedActivity` from `dumpsys activity activities`, which correctly reports the Flutter app even when the Fire TV launcher sits on top in the task stack. Falls back to `dumpsys activity top` (last ACTIVITY line) on older Android.
-- **`Semantics(identifier:)` does NOT populate `resource-id` on Fire TV**: The identifier value appears in `accessibilityText` instead. Maestro's `id:` selector does not work. Use plain text matching (`assertVisible: "Button Label"`) for TV app tests.
-- **D-pad presses are slow on Fire TV Stick**: Each `Remote Dpad` key press in Maestro can take 3–10 seconds. Always use generous `timeout=` values (at least 120s for multi-step flows) on every on-device `bash` call.
+- **ADB connection can drop silently**: On physical Fire TV devices over network ADB, the debug connection can drop during builds. If `flutter_run` exits with code 1 but the app appears running (check `flutter_app_status` for FUCKERY), do `flutter_stop` then `flutter_run` again.
+- **StatefulWidget / constructor changes need full rebuild**: Hot reload silently ignores structural changes like adding fields to classes or changing constructor signatures. Use `flutter_hot_restart` or full `flutter_stop` + `flutter_run`.
 - **`maestro hierarchy` output has a non-JSON prefix**: The first line is `Running on <ip>:<port>`. Strip it with `sed '1d'` before JSON parsing.
+
+### Flutter Widget Quirks on Fire TV
+
+- **`KeyDownEvent` NOT always emitted on hold**: Fire TV remotes may skip `KeyDownEvent` and emit only `KeyRepeatEvent` when a button is held. Event handlers must check for both `KeyDownEvent` and `KeyRepeatEvent`.
+- **`GestureDetector.onTap` does NOT fire on D-pad select**: D-pad Center button goes through `Focus.onKeyEvent`, not `GestureDetector`. For D-pad-friendly widgets, handle `LogicalKeyboardKey.select` in `Focus.onKeyEvent`.
+- **`Focus` must be outside visual styling**: Place `Focus` widget as the outer wrapper, with `Container`/`BoxDecoration` inside. Swapping them causes stale focus highlights.
+- **`showDialog` creates a new `FocusScope`**: Parent screens must check `ModalRoute.of(context)?.isCurrent` before calling `requestFocus()` or they will steal focus from the dialog.
