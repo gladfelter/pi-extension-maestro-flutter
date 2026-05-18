@@ -645,10 +645,12 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({
       device: Type.Optional(Type.String({ description: "Device ID to run on" })),
       args: Type.Optional(Type.Array(Type.String(), { description: "Additional arguments" })),
+      clear_logs: Type.Optional(Type.Boolean({ description: "Clear existing device logs before starting", default: true })),
     }),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const project = resolveProject(ctx.cwd);
       const targetDevice = params.device || s.savedDevice?.id;
+      const clearLogs = params.clear_logs ?? true;
       const currentSessionId = s.activeSessionId;
 
       if (s.flutterProcess) {
@@ -701,6 +703,14 @@ export default function (pi: ExtensionAPI) {
       const commandLabel = `flutter ${args.join(" ")}`;
 
       // Start logcat
+      if (clearLogs && targetDevice) {
+        try {
+          await pi.exec("adb", ["-s", targetDevice, "logcat", "-c"], { timeout: 5000, signal });
+        } catch {
+          console.error("Failed to clear logs.");
+        }
+      }
+
       const logPath = join(homedir(), ".pi", "tmp", `logcat-${Date.now()}.log`);
       try {
         const logFd = openSync(logPath, "w");
