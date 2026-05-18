@@ -6,7 +6,7 @@ import type { ExtensionState } from "../state.js";
  * Duplicated here because we don't want to export it from index.ts or move it yet.
  * Actually index.ts has it, maybe we should pass it or export it.
  * For now, we'll assume we can't easily reach it without moving things.
- * Let's just use a simple shell command to find it if needed, or better, 
+ * Let's just use a simple shell command to find it if needed, or better,
  * just pass a 'killDeviceApp' function to the tool.
  */
 
@@ -16,9 +16,15 @@ export function createFlutterStopTool(state: ExtensionState, killDeviceApp?: (ct
     label: "Flutter Stop",
     description: "Stop the running Flutter app and clean up state.",
     parameters: Type.Object({}),
-    async execute(_toolCallId: string, _params: any, _signal: AbortSignal, _onUpdate: any, ctx: any) {
+    async execute(
+      _toolCallId: string,
+      _params: any,
+      _signal: AbortSignal,
+      _onUpdate: any,
+      ctx: any,
+    ): Promise<{ content: { type: "text"; text: string }[]; details: { stoppedProcess: boolean } }> {
       const lines: string[] = [];
-      
+
       if (state.flutterProcess) {
         state.flutterProcess.kill();
         state.flutterProcess = null;

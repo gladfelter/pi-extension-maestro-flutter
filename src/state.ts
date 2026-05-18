@@ -17,7 +17,7 @@ export interface ExtensionState {
   // Flutter process
   flutterProcess: TrackedFlutterProcess | null;
   flutterOutput: string;
-  
+
   // Logcat process
   logcatProcess: ChildProcess | null;
   logcatPath: string | null;

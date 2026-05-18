@@ -27,7 +27,7 @@ import {
 import { parseAdbDevices, isEmulatorSerial } from "./common/emulator.js";
 import { walkAccessibilityTree, detectTextFieldIssues, filterLabels, formatLabelsOutput } from "./common/semantics.js";
 import { findFlutterProjects } from "./common/project-discovery.js";
-import { TrackedFlutterProcess, type ExtensionState } from "./state.js";
+import { TrackedFlutterProcess, type ExtensionState, createExtensionState } from "./state.js";
 import { createFlutterStopTool } from "./tools/flutter_stop.js";
 import { createFlutterHotReloadTool } from "./tools/flutter_hot_reload.js";
 import { createFlutterHotRestartTool } from "./tools/flutter_hot_restart.js";
@@ -38,17 +38,7 @@ import { createFlutterCurrentScreenTool } from "./tools/flutter_current_screen.j
 
 // TrackedFlutterProcess imported from ./state.js
 
-function createStateBridge(
-  pi: ExtensionAPI,
-  s: {
-    flutterProcess: TrackedFlutterProcess | null;
-    flutterOutput: string;
-    savedDevice: SavedDevice | null;
-    launchedEmulator: string | null;
-    selectedProject: FlutterProject | null;
-    activeSessionId: string | null;
-  },
-): ExtensionState {
+function createStateBridge(pi: ExtensionAPI, s: ExtensionState): ExtensionState {
   return new Proxy(s, {
     get(_target, prop) {
       if (prop === "pi") return pi;
@@ -62,14 +52,7 @@ function createStateBridge(
 }
 
 export default function (pi: ExtensionAPI) {
-  const s = {
-    flutterProcess: null as TrackedFlutterProcess | null,
-    flutterOutput: "",
-    savedDevice: null as SavedDevice | null,
-    launchedEmulator: null as string | null,
-    selectedProject: null as FlutterProject | null,
-    activeSessionId: null as string | null,
-  };
+  const s: ExtensionState = createExtensionState(pi);
   const state = createStateBridge(pi, s);
 
   function resolveProject(cwd: string): FlutterProject {
@@ -349,7 +332,10 @@ export default function (pi: ExtensionAPI) {
           }
           s.savedDevice = { id: targetId, type: "emulator", name: avdName };
           saveDeviceConfig(ctx.cwd, s.savedDevice);
-          ctx.ui.notify(`✅ Emulator already connected: ${targetId}${avdName ? ` (${avdName})` : ""}\nTip: Read the maestro-flutter-device-testing skill for mandatory protocols.`, "info");
+          ctx.ui.notify(
+            `✅ Emulator already connected: ${targetId}${avdName ? ` (${avdName})` : ""}\nTip: Read the maestro-flutter-device-testing skill for mandatory protocols.`,
+            "info",
+          );
           return;
         }
         ctx.ui.notify(`Emulator ${targetId} is not connected. Check with: adb devices`, "error");
@@ -366,7 +352,10 @@ export default function (pi: ExtensionAPI) {
           s.savedDevice = { id: alreadyRunning.serial, type: "emulator", name: alreadyRunning.avdName };
           s.launchedEmulator = alreadyRunning.serial;
           saveDeviceConfig(ctx.cwd, s.savedDevice);
-          ctx.ui.notify(`✅ Emulator already running: ${alreadyRunning.serial} (${alreadyRunning.avdName})\nTip: Read the maestro-flutter-device-testing skill for mandatory protocols.`, "info");
+          ctx.ui.notify(
+            `✅ Emulator already running: ${alreadyRunning.serial} (${alreadyRunning.avdName})\nTip: Read the maestro-flutter-device-testing skill for mandatory protocols.`,
+            "info",
+          );
           return;
         }
 
@@ -397,7 +386,10 @@ export default function (pi: ExtensionAPI) {
               s.savedDevice = { id: running.serial, type: "emulator", name: running.avdName };
               s.launchedEmulator = running.serial;
               saveDeviceConfig(ctx.cwd, s.savedDevice);
-              ctx.ui.notify(`✅ Emulator booted: ${running.serial} (${running.avdName})\nTip: Read the maestro-flutter-device-testing skill for mandatory protocols.`, "info");
+              ctx.ui.notify(
+                `✅ Emulator booted: ${running.serial} (${running.avdName})\nTip: Read the maestro-flutter-device-testing skill for mandatory protocols.`,
+                "info",
+              );
               return;
             }
           }
@@ -413,7 +405,10 @@ export default function (pi: ExtensionAPI) {
       }
       s.savedDevice = { id: targetId, type: "ip" };
       saveDeviceConfig(ctx.cwd, s.savedDevice);
-      ctx.ui.notify(`✅ Connected: ${targetId}\nTip: Read the maestro-flutter-device-testing skill for mandatory protocols.`, "info");
+      ctx.ui.notify(
+        `✅ Connected: ${targetId}\nTip: Read the maestro-flutter-device-testing skill for mandatory protocols.`,
+        "info",
+      );
     },
   });
 
@@ -499,11 +494,6 @@ export default function (pi: ExtensionAPI) {
       }
 
       // ── Case 2: emulator-avd:<AVD_NAME> — launch or reuse ────────
-      if (s.flutterProcess) {
-        s.flutterProcess.kill();
-        s.flutterProcess = null;
-        s.flutterOutput = "";
-      }
       if (targetId.startsWith("emulator-avd:")) {
         const avdName = targetId.replace("emulator-avd:", "");
 
@@ -573,11 +563,6 @@ export default function (pi: ExtensionAPI) {
       }
 
       // ── Case 3: IP:port — ADB network device ──────────────────────
-      if (s.flutterProcess) {
-        s.flutterProcess.kill();
-        s.flutterProcess = null;
-        s.flutterOutput = "";
-      }
       const result = await pi.exec("adb", ["connect", targetId], { timeout: 10000, signal });
       if (result.code !== 0 || result.stdout.includes("failed")) {
         throw new Error(`ADB connection failed:\n${result.stdout}`);
@@ -585,7 +570,12 @@ export default function (pi: ExtensionAPI) {
       s.savedDevice = { id: targetId, type: "ip" };
       saveDeviceConfig(cwd, s.savedDevice);
       return {
-        content: [{ type: "text", text: `✅ Connected: \`${targetId}\`\nSaved as default device.\nTip: Read the maestro-flutter-device-testing skill for mandatory protocols.` }],
+        content: [
+          {
+            type: "text",
+            text: `✅ Connected: \`${targetId}\`\nSaved as default device.\nTip: Read the maestro-flutter-device-testing skill for mandatory protocols.`,
+          },
+        ],
         details: { device: targetId },
       };
     },
@@ -645,7 +635,9 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({
       device: Type.Optional(Type.String({ description: "Device ID to run on" })),
       args: Type.Optional(Type.Array(Type.String(), { description: "Additional arguments" })),
-      clear_logs: Type.Optional(Type.Boolean({ description: "Clear existing device logs before starting", default: true })),
+      clear_logs: Type.Optional(
+        Type.Boolean({ description: "Clear existing device logs before starting", default: true }),
+      ),
     }),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const project = resolveProject(ctx.cwd);
@@ -892,7 +884,8 @@ export default function (pi: ExtensionAPI) {
         content: [
           {
             type: "text",
-            text: `🚀 Starting app: ${commandLabel}\n\n` +
+            text:
+              `🚀 Starting app: ${commandLabel}\n\n` +
               `**DO NOT use ADB, Maestro, or other Flutter tools while the build is in progress.** ` +
               `Doing so can corrupt the process and cause state tracking to fail.\n\n` +
               `You may work on code or other files, but do not sleep or wait for this operation. ` +
@@ -934,7 +927,7 @@ export default function (pi: ExtensionAPI) {
         throw new Error("No active logcat process is running.");
       }
       return {
-        content: [{ type: "text", text: s.logcatPath }],
+        content: [{ type: "text" as const, text: s.logcatPath }],
         details: { path: s.logcatPath },
       };
     },

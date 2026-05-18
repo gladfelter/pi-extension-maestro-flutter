@@ -29,7 +29,7 @@ interface NodeAttributes {
   clickable?: string;
   bounds?: string;
   class?: string;
-  'resource-id'?: string;
+  "resource-id"?: string;
   focused?: string;
 }
 
@@ -68,16 +68,16 @@ function walk(
   if (attrs) {
     let label = "";
     let type = "";
-    
+
     // Explicitly prioritize and identify the source attribute
     if (attrs.accessibilityText) {
       label = attrs.accessibilityText;
       type = "accessibilityText";
-    } else if (attrs['resource-id']) {
-      label = attrs['resource-id'];
+    } else if (attrs["resource-id"]) {
+      label = attrs["resource-id"];
       type = "resource-id";
     }
-    
+
     const text = attrs.text || "";
     const hintText = attrs.hintText || "";
     const clickable = attrs.clickable === "true";
@@ -163,7 +163,7 @@ export function formatLabelLine(label: AccessibilityLabel): string {
   const focus = label.isDeepestFocused ? "🎯" : label.focused ? "🔘" : "";
   const hint = label.hintText && !label.label ? ` ⚠️ hint-only: \`${label.hintText.split("\n")[0]}\`` : "";
   const extra = label.text && label.text !== label.label ? ` [${label.text}]` : "";
-  return `${click}${focus} [${label.type || 'unknown'}] '${label.label || label.text}' — ${label.bounds}${extra}${hint}`;
+  return `${click}${focus} [${label.type || "unknown"}] '${label.label || label.text}' — ${label.bounds}${extra}${hint}`;
 }
 
 /**

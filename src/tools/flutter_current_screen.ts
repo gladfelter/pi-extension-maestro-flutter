@@ -13,11 +13,10 @@ export function createFlutterCurrentScreenTool(state: ExtensionState) {
       // above the app in the task stack. dumpsys activity top returns the
       // launcher first, which is wrong. Query mResumedActivity instead —
       // this is the activity that actually holds input focus.
-      const result = await state.pi.exec(
-        "adb",
-        ["shell", "dumpsys", "activity", "activities"],
-        { timeout: 10000, signal },
-      );
+      const result = await state.pi.exec("adb", ["shell", "dumpsys", "activity", "activities"], {
+        timeout: 10000,
+        signal,
+      });
       if (result.code !== 0) {
         throw new Error(`dumpsys activity failed (exit ${result.code}):\n${result.stdout}`);
       }
