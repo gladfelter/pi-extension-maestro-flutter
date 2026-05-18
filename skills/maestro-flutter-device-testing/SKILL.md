@@ -5,10 +5,21 @@
 
 # ⚠️ MANDATORY PROTOCOL: MUST READ
 
-1. **USE WRAPPER SCRIPTS**: You **MUST** use the provided wrapper scripts for `maestro` and `adb` to prevent accidental connection breakage they prevent forbidden commands and configurations, and provide critical debugging information on failure.
+1. **USE WRAPPER SCRIPTS**: You **MUST** use the provided wrapper scripts for `maestro`, `adb`, and `flutter` to prevent accidental connection breakage.
    - These scripts are located in the `scripts/` directory relative to this skill:
      - Maestro: `scripts/maestro`
      - ADB: `scripts/adb`
+     - Flutter: `scripts/flutter`
+   - These scripts automatically:
+     - Detect forbidden commands and YAML configurations.
+     - Provide **AGENT INSTRUCTIONS** on stderr with log/screenshot locations if a `maestro` command fails.
+     - Output a **SUMMARY OF FINAL STATE** in the format `[AttributeSource] 'Value' — bounds: [...]`.
+       - Use the `AttributeSource` to construct the Maestro selector:
+         - `accessibilityText` maps to `tapOn: 'Value'`
+         - `resource-id` maps to `tapOn: { id: 'Value' }`
+       - Icons: 👆 (clickable), 🎯 (focused), 🔘 (focused-but-not-deepest).
+     - Block direct usage of `flutter run` unless `--force` is used.
+   - To bypass checks for advanced debugging, use the `--force` flag.
 
 2. **⚠️ FORBIDDEN MAESTRO COMMANDS**:
    - **DO NOT USE `launchApp`** or `pressKey: "Home"` or anything that might restart the app since that kills the active Flutter connection.

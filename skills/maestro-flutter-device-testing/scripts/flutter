@@ -1,0 +1,30 @@
+#!/bin/bash
+# Wrapper for flutter to encourage tool usage
+
+FORCE=false
+CMD_ARGS=()
+
+for arg in "$@"; do
+    if [ "$arg" == "--force" ]; then
+        FORCE=true
+    else
+        CMD_ARGS+=("$arg")
+    fi
+done
+
+# If the agent attempts to run, block it and point them to the tool (unless forced)
+if [ "$FORCE" = false ] && [[ "${CMD_ARGS[0]}" == "run" ]]; then
+    echo "ERROR: Do not use 'flutter run' directly." >&2
+    echo "This bypasses extension state tracking and causes hot-reload/inspection failures." >&2
+    echo "Use the 'flutter_run()' tool instead, or use --force to bypass this check." >&2
+    exit 1
+fi
+
+# Locate and execute original flutter binary
+FLUTTER_BIN=$(command -v flutter)
+if [ -z "$FLUTTER_BIN" ]; then
+    echo "ERROR: Could not find original flutter binary in PATH."
+    exit 1
+fi
+
+"$FLUTTER_BIN" "${CMD_ARGS[@]}"
