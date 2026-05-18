@@ -703,16 +703,13 @@ export default function (pi: ExtensionAPI) {
       const commandLabel = `flutter ${args.join(" ")}`;
 
       // Start logcat
-      if (clearLogs && targetDevice) {
-        try {
-          await pi.exec("adb", ["-s", targetDevice, "logcat", "-c"], { timeout: 5000, signal });
-        } catch {
-          console.error("Failed to clear logs.");
-        }
-      }
-
-      const logPath = join(homedir(), ".pi", "tmp", `logcat-${Date.now()}.log`);
+      const logDir = join(homedir(), ".pi", "tmp");
+      const logPath = join(logDir, `logcat-${Date.now()}.log`);
       try {
+        mkdirSync(logDir, { recursive: true });
+        if (clearLogs && targetDevice) {
+          await pi.exec("adb", ["-s", targetDevice, "logcat", "-c"], { timeout: 5000, signal });
+        }
         const logFd = openSync(logPath, "w");
         s.logcatProcess = spawn("adb", ["logcat"], {
           stdio: ["ignore", logFd, "ignore"],
@@ -720,7 +717,7 @@ export default function (pi: ExtensionAPI) {
         });
         s.logcatPath = logPath;
       } catch (e) {
-        console.error("Failed to start logcat:", e);
+        console.error("Failed to start/clear logcat:", e);
       }
 
       s.flutterOutput = "";
