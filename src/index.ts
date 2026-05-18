@@ -703,7 +703,7 @@ export default function (pi: ExtensionAPI) {
       const commandLabel = `flutter ${args.join(" ")}`;
 
       // Start logcat
-      const logDir = join(homedir(), ".pi", "tmp");
+      const logDir = join(ctx.cwd, ".pi", "tmp");
       const logPath = join(logDir, `logcat-${Date.now()}.log`);
       try {
         mkdirSync(logDir, { recursive: true });
