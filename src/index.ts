@@ -465,6 +465,11 @@ export default function (pi: ExtensionAPI) {
       const cwd = ctx.cwd;
 
       // ── Case 1: emulator-XXXX serial passed directly ──────────────
+      if (s.flutterProcess) {
+        s.flutterProcess.kill();
+        s.flutterProcess = null;
+        s.flutterOutput = "";
+      }
       if (targetId.startsWith("emulator-") && !targetId.startsWith("emulator-avd:")) {
         const connected = await isAdbDeviceConnected(targetId);
         if (connected) {
@@ -494,6 +499,11 @@ export default function (pi: ExtensionAPI) {
       }
 
       // ── Case 2: emulator-avd:<AVD_NAME> — launch or reuse ────────
+      if (s.flutterProcess) {
+        s.flutterProcess.kill();
+        s.flutterProcess = null;
+        s.flutterOutput = "";
+      }
       if (targetId.startsWith("emulator-avd:")) {
         const avdName = targetId.replace("emulator-avd:", "");
 
@@ -563,6 +573,11 @@ export default function (pi: ExtensionAPI) {
       }
 
       // ── Case 3: IP:port — ADB network device ──────────────────────
+      if (s.flutterProcess) {
+        s.flutterProcess.kill();
+        s.flutterProcess = null;
+        s.flutterOutput = "";
+      }
       const result = await pi.exec("adb", ["connect", targetId], { timeout: 10000, signal });
       if (result.code !== 0 || result.stdout.includes("failed")) {
         throw new Error(`ADB connection failed:\n${result.stdout}`);
@@ -637,7 +652,22 @@ export default function (pi: ExtensionAPI) {
       const currentSessionId = s.activeSessionId;
 
       if (s.flutterProcess) {
-        throw new Error("Flutter is already running. Use flutter_hot_reload or flutter_stop first.");
+        // Health check: Is the process actually still alive?
+        let isAlive = false;
+        if (s.flutterProcess.pid) {
+          try {
+            process.kill(s.flutterProcess.pid, 0);
+            isAlive = true;
+          } catch {}
+        }
+
+        if (isAlive) {
+          throw new Error("Flutter is already running. Use flutter_hot_reload or flutter_stop first.");
+        } else {
+          // Process is dead, cleanup stale state
+          s.flutterProcess = null;
+          s.flutterOutput = "";
+        }
       }
 
       // Check if Flutter is already running on device (e.g., from previous run killed by reload)
