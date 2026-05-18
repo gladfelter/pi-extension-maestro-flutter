@@ -5,8 +5,8 @@ import type { ExtensionState } from "../state.js";
 
 export function createMaestroTestFileTool(state: ExtensionState) {
   return {
-    name: "maestro_test_file",
-    label: "Maestro Test File",
+    name: "flutter_maestro_create_test",
+    label: "Flutter Maestro Create Test",
     description:
       "Create a temp YAML file for maestro test flows. Returns the path for writing. All maestro test ephemera lives in .pi/tmp/ so it stays together and is garbage-collectable. Use this instead of bare /tmp/ files or writing YAML to the project root.",
     parameters: Type.Object({

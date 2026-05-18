@@ -20,11 +20,10 @@
        - Icons: 👆 (clickable), 🎯 (focused), 🔘 (focused-but-not-deepest).
      - Block direct usage of `flutter run` unless `--force` is used.
    - To bypass checks for advanced debugging, use the `--force` flag.
-
 2. **⚠️ FORBIDDEN MAESTRO COMMANDS**:
    - **DO NOT USE `launchApp`** or `pressKey: "Home"` or anything that might restart the app since that kills the active Flutter connection.
-   - **Navigation MUST be via Remote Dpad keys**: Use `pressKey: "Remote Dpad ..."` for all navigation.
-3.  **End your turn after `flutter_run()`**:
+   - **For TV Device Apps, Navigation MUST be via Remote Dpad keys**: Use `pressKey: "Remote Dpad ..."` and `pressKey: "Back"` for all navigation. You can use `tapOn` for clicking buttons and when navigation is not being tested, but avoid if reasonable.
+3. **End your turn after `flutter_run()`**:
    - The extension will notify you when the app is ready.
    - Do NOT perform any Maestro, ADB, or Flutter operations until then.
 
@@ -38,7 +37,9 @@ If you use the wrapper scripts you shouldn't encounter "State mismatch" errors. 
 
 If you encounter errors or unexplained behavior, use the `flutter_app_status` tool to verify that flutter is still connected.
 
-**FIX:** If you find yourself in a "State Mismatch" state (detected by `flutter_app_status`), run `flutter_stop()` followed by `flutter_run()` to reset the connection.
+**FIX:**
+
+If you find yourself in a "State Mismatch" state (detected by `flutter_app_status`), run `flutter_stop()` followed by `flutter_run()` to reset the connection.
 
 # ⚠️ TIMEOUTS — Critical for Physical Devices
 
@@ -75,22 +76,28 @@ See **[references/emulators.md](references/emulators.md)** for common commands a
 2.  **Connect**: `flutter_connect(id: "<device-id>")`
 3.  **Run**: `flutter_run()` (Fire-and-forget; wait for follow-up message).
 4.  **Inspect**: Once ready, `flutter_app_status()` and `flutter_inspect_tree()`.
-5.  **Test**: 
-    - `maestro_test_file(...)` to create a test file.
-    - `bash(command: "./skills/maestro-flutter-device-testing/scripts/maestro test <path-to-test>")`
-6.  **Debug (if needed)**:
-    - `get_logcat_path()` to find the log file.
-    - `bash(command: 'grep "Error" $(get_logcat_path())')` to analyze logs.
+5.  **Test**:
+    - `flutter_maestro_create_test(...)` to create a test file.
+    - `bash(command: "skills/maestro-flutter-device-testing/scripts/maestro test <path-to-test>")`
+6.  **Debug Errors**:
+    - `flutter_get_logcat_path()` to find the log file.
+    - `bash(command: 'grep "Error" $(flutter_get_logcat_path())')` to analyze logs.
 7.  **Iterate**: `flutter_hot_reload()` or `flutter_hot_restart()` after code edits.
 8.  **Shutdown**: `flutter_stop()` when finished.
 
 ## Inspecting using the VM Service (CLI — raw WebSocket access)
 
-For queries beyond `flutter_inspect_tree()`, see how to use the [VM Service](https://dart.dev/tools/dartdev#vm-service).
+For queries beyond `flutter_inspect_tree()`, see how to use the [VM Service](https://github.com/dart-lang/sdk/blob/main/runtime/vm/service/service.md).
 
 ### Common Maestro actions
 
 ```yaml
+- pressKey: "Remote Dpad Left"
+- pressKey: "Remote Dpad Right"
+- pressKey: "Remote Dpad Up"
+- pressKey: "Remote Dpad Down"
+- pressKey: "Remote Dpad Center"
+- pressKey: "Back"
 - tapOn: "button-label"
 - tapOn: { point: "50%,50%" }
 - tapOn: "username-field"

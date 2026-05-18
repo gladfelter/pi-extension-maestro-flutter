@@ -31,7 +31,7 @@ import { TrackedFlutterProcess, type ExtensionState } from "./state.js";
 import { createFlutterStopTool } from "./tools/flutter_stop.js";
 import { createFlutterHotReloadTool } from "./tools/flutter_hot_reload.js";
 import { createFlutterHotRestartTool } from "./tools/flutter_hot_restart.js";
-import { createMaestroTestFileTool } from "./tools/maestro_test_file.js";
+import { createMaestroTestFileTool } from "./tools/flutter_maestro_create_test.js";
 import { createFlutterInspectTreeTool } from "./tools/flutter_inspect_tree.js";
 import { createFlutterScreenshotTool } from "./tools/flutter_screenshot.js";
 import { createFlutterCurrentScreenTool } from "./tools/flutter_current_screen.js";
@@ -928,7 +928,7 @@ export default function (pi: ExtensionAPI) {
 
   // @ts-ignore - extracted tool type inference
   pi.registerTool({
-    name: "get_logcat_path",
+    name: "flutter_get_logcat_path",
     label: "Get Logcat Path",
     description: "Get the path to the currently active logcat log file.",
     parameters: Type.Object({}),
