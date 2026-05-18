@@ -17,6 +17,10 @@ export interface ExtensionState {
   // Flutter process
   flutterProcess: TrackedFlutterProcess | null;
   flutterOutput: string;
+  
+  // Logcat process
+  logcatProcess: ChildProcess | null;
+  logcatPath: string | null;
 
   // Device
   savedDevice: SavedDevice | null;
@@ -32,6 +36,8 @@ export function createExtensionState(pi: ExtensionAPI): ExtensionState {
     pi,
     flutterProcess: null,
     flutterOutput: "",
+    logcatProcess: null,
+    logcatPath: null,
     savedDevice: null,
     launchedEmulator: null,
     selectedProject: null,

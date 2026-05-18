@@ -1,0 +1,79 @@
+#!/bin/bash
+# Wrapper for maestro to prevent connection-breaking commands
+
+set -o pipefail
+
+FORCE=false
+CMD_ARGS=()
+
+for arg in "$@"; do
+    if [ "$arg" == "--force" ]; then
+        FORCE=true
+    else
+        CMD_ARGS+=("$arg")
+    fi
+done
+
+if [ "$FORCE" = false ]; then
+    # Check command line arguments for forbidden strings
+    for arg in "${CMD_ARGS[@]}"; do
+        if [[ "$arg" == *"launchApp"* ]] || [[ "$arg" == *"pressKey: \"Home\""* ]]; then
+            echo "ERROR: Forbidden maestro command detected in arguments: $arg"
+            echo "Use --force to bypass this check."
+            exit 1
+        fi
+    done
+
+    # Check for test.yaml files and parse them if present
+    for arg in "${CMD_ARGS[@]}"; do
+        if [[ "$arg" == *.yaml ]]; then
+            # Simple check for forbidden keywords in YAML file
+            if grep -E "launchApp|pressKey:.*Home" "$arg" > /dev/null; then
+                echo "ERROR: Forbidden command detected in $arg"
+                echo "Use --force to bypass this check."
+                exit 1
+            fi
+        fi
+    done
+fi
+
+# Locate and execute original maestro binary
+MAESTRO_BIN=$(command -v maestro)
+if [ -z "$MAESTRO_BIN" ]; then
+    echo "ERROR: Could not find original maestro binary in PATH."
+    exit 1
+fi
+
+# Create temporary file for output capture
+TMP_OUT=$(mktemp)
+
+# Execute and stream stdout, capturing it for later parsing
+"$MAESTRO_BIN" "${CMD_ARGS[@]}" | tee "$TMP_OUT"
+EXIT_CODE=$?
+
+# If it failed, report status, check for the log path, and provide agent instructions
+if [ $EXIT_CODE -ne 0 ]; then
+    echo -e "\n----------------------------------------" >&2
+    echo "Maestro command failed with exit code: $EXIT_CODE" >&2
+    
+    # Search for .maestro/tests/ path in output
+    LOG_PATH=$(grep -oE "[^ ]*/\.maestro/tests/[^ ]+" "$TMP_OUT" | head -n 1)
+
+    if [ -n "$LOG_PATH" ] && [ -d "$LOG_PATH" ]; then
+        echo -e "\n**AGENT INSTRUCTIONS**: The maestro command failed. Look at the logs and (if necessary) screenshots to debug the failure." >&2
+        echo "Directory: $LOG_PATH" >&2
+        echo "Artifacts found:" >&2
+        find "$LOG_PATH" -maxdepth 1 \( -name "*.log" -o -name "*.png" -o -name "*.json" \) -printf "  - %f\n" >&2
+        
+        # Look for the last JSON command log
+        LOG_FILE=$(find "$LOG_PATH" -name "commands-*.json" | sort | tail -n 1)
+        if [ -n "$LOG_FILE" ]; then
+            echo -e "\n**SUMMARY OF FINAL STATE**:" >&2
+            node "$(dirname "$0")/analyze_log.js" "$LOG_FILE" >&2
+        fi
+    fi
+    echo -e "----------------------------------------\n" >&2
+fi
+
+rm "$TMP_OUT"
+exit $EXIT_CODE

@@ -131,7 +131,7 @@ setTimeout(() => { console.error('Timeout'); process.exit(1); }, 15000);
   mkdirSync(join(cwd, `.pi`), { recursive: true });
   writeFileSync(tempFile, script);
   try {
-    const result = await state.pi.exec("node", [tempFile], { timeout: 20000 });
+    const result = await state.pi.exec("node", [tempFile], { timeout: 120000 });
     if (result.code !== 0) {
       const output = [result.stdout, result.stderr].filter(Boolean).join("\n");
       throw new Error(`VM call failed (exit ${result.code}):\n${output.trim()}`);

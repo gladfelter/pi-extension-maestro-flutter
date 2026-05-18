@@ -1,0 +1,33 @@
+#!/bin/bash
+# Wrapper for adb to prevent connection-breaking commands
+
+FORCE=false
+CMD_ARGS=()
+
+for arg in "$@"; do
+    if [ "$arg" == "--force" ]; then
+        FORCE=true
+    else
+        CMD_ARGS+=("$arg")
+    fi
+done
+
+if [ "$FORCE" = false ]; then
+    # Combine arguments to check the full command
+    FULL_CMD="${CMD_ARGS[*]}"
+    
+    if [[ "$FULL_CMD" == *"shell am force-stop"* ]] || [[ "$FULL_CMD" == *"shell pkill -f"* ]]; then
+        echo "ERROR: Forbidden ADB command detected: $FULL_CMD"
+        echo "Use --force to bypass this check."
+        exit 1
+    fi
+fi
+
+# Locate and execute original adb binary
+ADB_BIN=$(command -v adb)
+if [ -z "$ADB_BIN" ]; then
+    echo "ERROR: Could not find original adb binary in PATH."
+    exit 1
+fi
+
+"$ADB_BIN" "${CMD_ARGS[@]}"

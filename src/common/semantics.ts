@@ -5,10 +5,13 @@
 
 export interface AccessibilityLabel {
   label: string;
+  type: string; // Added to distinguish accessibilityText vs resource-id
   text?: string;
   hintText?: string;
   clickable: boolean;
   bounds: string;
+  focused?: boolean;
+  isDeepestFocused?: boolean;
 }
 
 export interface TextFieldIssue {
@@ -26,6 +29,8 @@ interface NodeAttributes {
   clickable?: string;
   bounds?: string;
   class?: string;
+  'resource-id'?: string;
+  focused?: string;
 }
 
 /**
@@ -34,39 +39,72 @@ interface NodeAttributes {
  */
 export function walkAccessibilityTree(root: unknown): AccessibilityLabel[] {
   const labels: AccessibilityLabel[] = [];
-  walk(root, labels);
+  let deepestFocusedDepth = -1;
+  let deepestFocusedLabel: AccessibilityLabel | undefined;
+
+  walk(root, labels, 0, (label, depth) => {
+    if (label.focused && depth > deepestFocusedDepth) {
+      deepestFocusedDepth = depth;
+      deepestFocusedLabel = label;
+    }
+  });
+
+  if (deepestFocusedLabel) {
+    deepestFocusedLabel.isDeepestFocused = true;
+  }
   return labels;
 }
 
-function walk(node: unknown, labels: AccessibilityLabel[]): void {
+function walk(
+  node: unknown,
+  labels: AccessibilityLabel[],
+  depth: number,
+  onLabel: (label: AccessibilityLabel, depth: number) => void,
+): void {
   if (!node || typeof node !== "object" || Array.isArray(node)) return;
   const obj = node as Record<string, unknown>;
   const attrs = obj.attributes as NodeAttributes | undefined;
 
   if (attrs) {
-    const accessibilityText = attrs.accessibilityText || "";
+    let label = "";
+    let type = "";
+    
+    // Explicitly prioritize and identify the source attribute
+    if (attrs.accessibilityText) {
+      label = attrs.accessibilityText;
+      type = "accessibilityText";
+    } else if (attrs['resource-id']) {
+      label = attrs['resource-id'];
+      type = "resource-id";
+    }
+    
     const text = attrs.text || "";
     const hintText = attrs.hintText || "";
     const clickable = attrs.clickable === "true";
     const bounds = attrs.bounds || "";
+    const focused = attrs.focused === "true";
 
     const children = obj.children as unknown[] | undefined;
     const hasChildren = Array.isArray(children) && children.length > 0;
 
     // Include if it has meaningful text/hint and is a leaf or clickable
-    if ((accessibilityText || text || hintText) && (!hasChildren || clickable)) {
-      labels.push({
-        label: accessibilityText,
+    if ((label || text || hintText) && (!hasChildren || clickable)) {
+      const labelObj: AccessibilityLabel = {
+        label,
+        type,
         text: text || undefined,
         hintText: hintText || undefined,
         clickable,
         bounds,
-      });
+        focused,
+      };
+      labels.push(labelObj);
+      onLabel(labelObj, depth);
     }
   }
 
   if (Array.isArray(obj.children)) {
-    for (const child of obj.children) walk(child, labels);
+    for (const child of obj.children) walk(child, labels, depth + 1, onLabel);
   }
 }
 
@@ -122,9 +160,10 @@ export function filterLabels(labels: AccessibilityLabel[], query: string): Acces
  */
 export function formatLabelLine(label: AccessibilityLabel): string {
   const click = label.clickable ? "👆" : "";
+  const focus = label.isDeepestFocused ? "🎯" : label.focused ? "🔘" : "";
   const hint = label.hintText && !label.label ? ` ⚠️ hint-only: \`${label.hintText.split("\n")[0]}\`` : "";
   const extra = label.text && label.text !== label.label ? ` [${label.text}]` : "";
-  return `${click} \`${label.label || label.text}\` — ${label.bounds}${extra}${hint}`;
+  return `${click}${focus} [${label.type || 'unknown'}] '${label.label || label.text}' — ${label.bounds}${extra}${hint}`;
 }
 
 /**

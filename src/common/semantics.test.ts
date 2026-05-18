@@ -13,7 +13,8 @@ function makeTree(root: Record<string, unknown>): unknown {
 }
 
 function makeNode(attrs: Record<string, string>, children: unknown[] = []): Record<string, unknown> {
-  return { attributes: attrs, children };
+  const focused = attrs.focused || "false";
+  return { attributes: { ...attrs, focused }, children };
 }
 
 describe("walkAccessibilityTree", () => {
@@ -33,9 +34,11 @@ describe("walkAccessibilityTree", () => {
     expect(labels).toEqual([
       {
         label: "counter-display",
+        type: "accessibilityText",
         text: "Count: 0",
         clickable: false,
         bounds: "0,0-100,50",
+        focused: false,
       },
     ]);
   });
@@ -54,13 +57,17 @@ describe("walkAccessibilityTree", () => {
     const labels = walkAccessibilityTree(tree);
     expect(labels[0].clickable).toBe(true);
     expect(labels[0].label).toBe("increment-button");
+    expect(labels[0].type).toBe("accessibilityText");
+    expect(labels[0].focused).toBe(false);
   });
 
   it("extracts nodes with only text (no accessibilityText)", () => {
     const tree = makeTree(makeNode({ text: "Some text", clickable: "false", bounds: "0,0-50,20" }));
     const labels = walkAccessibilityTree(tree);
     expect(labels[0].label).toBe("");
+    expect(labels[0].type).toBe("");
     expect(labels[0].text).toBe("Some text");
+    expect(labels[0].focused).toBe(false);
   });
 
   it("skips nodes with no text/accessibility/hint", () => {
@@ -68,32 +75,26 @@ describe("walkAccessibilityTree", () => {
     expect(walkAccessibilityTree(tree)).toEqual([]);
   });
 
-  it("recurses into nested children", () => {
-    const tree = makeTree({
-      attributes: { class: "android.view.ViewGroup" },
-      children: [
-        makeNode(
-          {
-            class: "android.view.ViewGroup",
-            clickable: "false",
-            bounds: "0,0-300,500",
-          },
-          [
-            makeNode(
-              {
-                accessibilityText: "nested-label",
-                clickable: "false",
-                bounds: "10,10-100,30",
-              },
-              [],
-            ),
-          ],
-        ),
-      ],
-    });
+  it("identifies the deepest-nested focused element", () => {
+    const tree = makeTree(
+      makeNode({ class: "parent", focused: "true" }, [
+        makeNode({ class: "child", focused: "true", accessibilityText: "child-label" }, []),
+      ]),
+    );
     const labels = walkAccessibilityTree(tree);
-    expect(labels.length).toBe(1);
-    expect(labels[0].label).toBe("nested-label");
+    
+    // Parent doesn't have a label in this test, child does.
+    // Wait, walkAccessibilityTree filters by meaningful text.
+    // Let's add label to parent.
+    const treeWithLabels = makeTree(
+        makeNode({ class: "parent", focused: "true", accessibilityText: "parent-label" }, [
+          makeNode({ class: "child", focused: "true", accessibilityText: "child-label" }, []),
+        ]),
+      );
+    const labels2 = walkAccessibilityTree(treeWithLabels);
+    
+    expect(labels2.find(l => l.label === "parent-label")?.isDeepestFocused).toBeFalsy();
+    expect(labels2.find(l => l.label === "child-label")?.isDeepestFocused).toBe(true);
   });
 
   it("includes clickable nodes even when they have children", () => {
@@ -176,11 +177,11 @@ describe("detectTextFieldIssues", () => {
 });
 
 describe("filterLabels", () => {
-  const labels = [
-    { label: "counter-display", text: "Count: 0", clickable: false, bounds: "0,0-100,50" },
-    { label: "increment-button", clickable: true, bounds: "100,0-200,50" },
-    { label: "", text: "Count: 0", clickable: false, bounds: "0,0-100,50" },
-    { label: "name-field", hintText: "Enter name", clickable: true, bounds: "0,0-200,40" },
+  const labels: AccessibilityLabel[] = [
+    { label: "counter-display", type: "accessibilityText", text: "Count: 0", clickable: false, bounds: "0,0-100,50", focused: false },
+    { label: "increment-button", type: "accessibilityText", clickable: true, bounds: "100,0-200,50", focused: false },
+    { label: "", type: "", text: "Count: 0", clickable: false, bounds: "0,0-100,50", focused: false },
+    { label: "name-field", type: "accessibilityText", hintText: "Enter name", clickable: true, bounds: "0,0-200,40", focused: false },
   ];
 
   it("returns all labels when query is empty", () => {
@@ -211,26 +212,26 @@ describe("filterLabels", () => {
 
 describe("formatLabelLine", () => {
   it("formats a basic label with extra text in brackets", () => {
-    const label = { label: "counter-display", text: "Count: 0", clickable: false, bounds: "0,0-100,50" };
+    const label: AccessibilityLabel = { label: "counter-display", type: "accessibilityText", text: "Count: 0", clickable: false, bounds: "0,0-100,50", focused: false };
     const line = formatLabelLine(label);
     expect(line).not.toContain("👆"); // not clickable
     expect(line).toContain("[Count: 0]"); // extra text shown
   });
 
   it("adds clickable emoji", () => {
-    const label = { label: "increment-button", clickable: true, bounds: "100,0-200,50" };
+    const label: AccessibilityLabel = { label: "increment-button", type: "accessibilityText", clickable: true, bounds: "100,0-200,50", focused: false };
     const line = formatLabelLine(label);
     expect(line).toContain("👆");
   });
 
   it("shows hint-only warning", () => {
-    const label = { label: "", hintText: "name-field", clickable: false, bounds: "0,0-200,40" };
+    const label: AccessibilityLabel = { label: "", type: "", hintText: "name-field", clickable: false, bounds: "0,0-200,40", focused: false };
     const line = formatLabelLine(label);
     expect(line).toContain("⚠️ hint-only");
   });
 
   it("shows extra text in brackets", () => {
-    const label = { label: "counter-display", text: "Count: 0", clickable: false, bounds: "0,0-100,50" };
+    const label: AccessibilityLabel = { label: "counter-display", type: "accessibilityText", text: "Count: 0", clickable: false, bounds: "0,0-100,50", focused: false };
     const line = formatLabelLine(label);
     expect(line).toContain("[Count: 0]");
   });
@@ -238,7 +239,7 @@ describe("formatLabelLine", () => {
 
 describe("formatLabelsOutput", () => {
   it("produces output with TextField warnings", () => {
-    const labels = [{ label: "counter-display", text: "Count: 0", clickable: false, bounds: "0,0-100,50" }];
+    const labels: AccessibilityLabel[] = [{ label: "counter-display", type: "accessibilityText", text: "Count: 0", clickable: false, bounds: "0,0-100,50", focused: false }];
     const issues = [{ hintTextLabel: "name-field", bounds: "0,0-200,40", className: "android.widget.EditText" }];
     const output = formatLabelsOutput(labels, 1, issues);
     expect(output).toContain("⚠️ TextField semantics issue detected (1 field)");
@@ -247,7 +248,7 @@ describe("formatLabelsOutput", () => {
   });
 
   it("produces clean output with no issues", () => {
-    const labels = [{ label: "counter-display", clickable: false, bounds: "0,0-100,50" }];
+    const labels: AccessibilityLabel[] = [{ label: "counter-display", type: "accessibilityText", clickable: false, bounds: "0,0-100,50", focused: false }];
     const output = formatLabelsOutput(labels, 1, []);
     expect(output).not.toContain("⚠️");
   });

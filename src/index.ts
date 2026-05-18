@@ -12,7 +12,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { spawn, ChildProcess } from "node:child_process";
-import { writeFileSync, unlinkSync, readdirSync, existsSync, readFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, unlinkSync, readdirSync, existsSync, readFileSync, mkdirSync, openSync } from "node:fs";
 import { join, dirname, relative } from "node:path";
 import { homedir } from "node:os";
 import { loadDeviceConfig, saveDeviceConfig } from "./common/device-config.js";
@@ -128,6 +128,11 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async (event) => {
     s.activeSessionId = null;
+    if (s.logcatProcess) {
+      s.logcatProcess.kill();
+      s.logcatProcess = null;
+      s.logcatPath = null;
+    }
     if (event.reason === "reload" && s.flutterProcess) {
       s.flutterProcess = null;
       s.flutterOutput = "";
@@ -344,7 +349,7 @@ export default function (pi: ExtensionAPI) {
           }
           s.savedDevice = { id: targetId, type: "emulator", name: avdName };
           saveDeviceConfig(ctx.cwd, s.savedDevice);
-          ctx.ui.notify(`✅ Emulator already connected: ${targetId}${avdName ? ` (${avdName})` : ""}`, "info");
+          ctx.ui.notify(`✅ Emulator already connected: ${targetId}${avdName ? ` (${avdName})` : ""}\nTip: Read the maestro-flutter-device-testing skill for mandatory protocols.`, "info");
           return;
         }
         ctx.ui.notify(`Emulator ${targetId} is not connected. Check with: adb devices`, "error");
@@ -361,7 +366,7 @@ export default function (pi: ExtensionAPI) {
           s.savedDevice = { id: alreadyRunning.serial, type: "emulator", name: alreadyRunning.avdName };
           s.launchedEmulator = alreadyRunning.serial;
           saveDeviceConfig(ctx.cwd, s.savedDevice);
-          ctx.ui.notify(`✅ Emulator already running: ${alreadyRunning.serial} (${alreadyRunning.avdName})`, "info");
+          ctx.ui.notify(`✅ Emulator already running: ${alreadyRunning.serial} (${alreadyRunning.avdName})\nTip: Read the maestro-flutter-device-testing skill for mandatory protocols.`, "info");
           return;
         }
 
@@ -392,7 +397,7 @@ export default function (pi: ExtensionAPI) {
               s.savedDevice = { id: running.serial, type: "emulator", name: running.avdName };
               s.launchedEmulator = running.serial;
               saveDeviceConfig(ctx.cwd, s.savedDevice);
-              ctx.ui.notify(`✅ Emulator booted: ${running.serial} (${running.avdName})`, "info");
+              ctx.ui.notify(`✅ Emulator booted: ${running.serial} (${running.avdName})\nTip: Read the maestro-flutter-device-testing skill for mandatory protocols.`, "info");
               return;
             }
           }
@@ -408,7 +413,7 @@ export default function (pi: ExtensionAPI) {
       }
       s.savedDevice = { id: targetId, type: "ip" };
       saveDeviceConfig(ctx.cwd, s.savedDevice);
-      ctx.ui.notify(`✅ Connected: ${targetId}`, "info");
+      ctx.ui.notify(`✅ Connected: ${targetId}\nTip: Read the maestro-flutter-device-testing skill for mandatory protocols.`, "info");
     },
   });
 
@@ -479,7 +484,7 @@ export default function (pi: ExtensionAPI) {
             content: [
               {
                 type: "text",
-                text: `✅ Emulator already connected: \`${targetId}\`${avdName ? ` (${avdName})` : ""}\nSaved as default device.`,
+                text: `✅ Emulator already connected: \`${targetId}\`${avdName ? ` (${avdName})` : ""}\nSaved as default device.\nTip: Read the maestro-flutter-device-testing skill for mandatory protocols.`,
               },
             ],
             details: { device: targetId, avd: avdName, existing: true },
@@ -501,7 +506,7 @@ export default function (pi: ExtensionAPI) {
             content: [
               {
                 type: "text",
-                text: `✅ Emulator already running: \`${alreadyRunning.serial}\` (${alreadyRunning.avdName})\nSaved as default device.`,
+                text: `✅ Emulator already running: \`${alreadyRunning.serial}\` (${alreadyRunning.avdName})\nSaved as default device.\nTip: Read the maestro-flutter-device-testing skill for mandatory protocols.`,
               },
             ],
             details: { device: alreadyRunning.serial, avd: alreadyRunning.avdName, existing: true },
@@ -546,7 +551,7 @@ export default function (pi: ExtensionAPI) {
                 content: [
                   {
                     type: "text",
-                    text: `✅ Emulator launched and booted: \`${running.serial}\` (${running.avdName})\nSaved as default device.`,
+                    text: `✅ Emulator launched and booted: \`${running.serial}\` (${running.avdName})\nSaved as default device.\nTip: Read the maestro-flutter-device-testing skill for mandatory protocols.`,
                   },
                 ],
                 details: { device: running.serial, avd: running.avdName },
@@ -565,7 +570,7 @@ export default function (pi: ExtensionAPI) {
       s.savedDevice = { id: targetId, type: "ip" };
       saveDeviceConfig(cwd, s.savedDevice);
       return {
-        content: [{ type: "text", text: `✅ Connected: \`${targetId}\`\nSaved as default device.` }],
+        content: [{ type: "text", text: `✅ Connected: \`${targetId}\`\nSaved as default device.\nTip: Read the maestro-flutter-device-testing skill for mandatory protocols.` }],
         details: { device: targetId },
       };
     },
@@ -664,6 +669,19 @@ export default function (pi: ExtensionAPI) {
       const verb = useAttach ? "attach" : "run";
       const args = [verb, ...(targetDevice ? ["-d", targetDevice] : []), ...(params.args || [])];
       const commandLabel = `flutter ${args.join(" ")}`;
+
+      // Start logcat
+      const logPath = join(homedir(), ".pi", "tmp", `logcat-${Date.now()}.log`);
+      try {
+        const logFd = openSync(logPath, "w");
+        s.logcatProcess = spawn("adb", ["logcat"], {
+          stdio: ["ignore", logFd, "ignore"],
+          detached: true,
+        });
+        s.logcatPath = logPath;
+      } catch (e) {
+        console.error("Failed to start logcat:", e);
+      }
 
       s.flutterOutput = "";
       const proc = spawn("flutter", args, {
@@ -852,6 +870,11 @@ export default function (pi: ExtensionAPI) {
   // @ts-ignore - extracted tool type inference
   pi.registerTool(
     createFlutterStopTool(state, async (ctx) => {
+      if (s.logcatProcess) {
+        s.logcatProcess.kill();
+        s.logcatProcess = null;
+        s.logcatPath = null;
+      }
       const pkg = getPackageName(ctx.cwd);
       const device = s.savedDevice?.id;
       if (pkg && device) {
@@ -862,6 +885,23 @@ export default function (pi: ExtensionAPI) {
 
   // @ts-ignore - extracted tool type inference
   pi.registerTool(createFlutterHotReloadTool(state));
+
+  // @ts-ignore - extracted tool type inference
+  pi.registerTool({
+    name: "get_logcat_path",
+    label: "Get Logcat Path",
+    description: "Get the path to the currently active logcat log file.",
+    parameters: Type.Object({}),
+    async execute() {
+      if (!s.logcatPath) {
+        throw new Error("No active logcat process is running.");
+      }
+      return {
+        content: [{ type: "text", text: s.logcatPath }],
+        details: { path: s.logcatPath },
+      };
+    },
+  });
 
   // @ts-ignore - extracted tool type inference
   pi.registerTool(createFlutterHotRestartTool(state));
@@ -952,7 +992,7 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      // ── FUCKERY DETECTION ──────────────────────────────────────────
+      // ── STATE MISMATCH DETECTION ──────────────────────────────────────
 
       // Case A: App is running on device, but extension has no tracked process
       if (devicePid && !s.flutterProcess) {
@@ -961,13 +1001,14 @@ export default function (pi: ExtensionAPI) {
             {
               type: "text" as const,
               text:
-                `⚠️ FUCKERY DETECTED: App \`${packageName}\` is running on device (PID ${devicePid}), but it is NOT connected to the Flutter tool.\n\n` +
-                `This happens if you used \`adb shell am start\` or started the app without using \`flutter_run\`. ` +
+                `⚠️ STATE MISMATCH DETECTED: App \`${packageName}\` is running on device (PID ${devicePid}), but it is NOT connected to the Flutter tool.\n\n` +
+                `This happens if the app was started outside of the extension (e.g., \`adb shell am start\`). ` +
                 `Hot reload and hot restart will NOT work.\n\n` +
-                `FIX: Use \`flutter_stop\` then \`flutter_run\` to restart the app properly.`,
+                `FIX: Use \`flutter_stop\` then \`flutter_run\` to restart the app properly.\n` +
+                `⚠️ REMINDER: Always use the provided wrapper scripts (scripts/maestro, scripts/adb) for CLI operations to avoid state corruption. Read the maestro-flutter-device-testing skill if you are unsure of the protocol.`,
             },
           ],
-          details: { running: true as const, connected: false as const, pid: devicePid, fuckery: "zombie_app" },
+          details: { running: true as const, connected: false as const, pid: devicePid, stateMismatch: "zombie_app" },
         };
       }
 
@@ -980,14 +1021,15 @@ export default function (pi: ExtensionAPI) {
               text:
                 `⚠️ DISCONNECTION DETECTED: The Flutter tool is running, but it lost contact with the app on the device (PID ${devicePid}).\n\n` +
                 `This often happens if the app crashed and was restarted manually, or if ADB was manipulated directly.\n\n` +
-                `FIX: Use \`flutter_stop\` then \`flutter_run\`.`,
+                `FIX: Use \`flutter_stop\` then \`flutter_run\`.\n` +
+                `⚠️ REMINDER: Always use the provided wrapper scripts (scripts/maestro, scripts/adb) for CLI operations to avoid state corruption. Read the maestro-flutter-device-testing skill if you are unsure of the protocol.`,
             },
           ],
           details: {
             running: true as const,
             connected: false as const,
             pid: devicePid,
-            fuckery: "disconnected_process",
+            stateMismatch: "disconnected_process",
           },
         };
       }
@@ -1005,7 +1047,7 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      // ── END FUCKERY DETECTION ──────────────────────────────────────
+      // ── END STATE MISMATCH DETECTION ──────────────────────────────────
 
       // Check 3: Crash log
       try {
