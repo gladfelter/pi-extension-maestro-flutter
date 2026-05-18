@@ -71,17 +71,18 @@ See **[references/emulators.md](references/emulators.md)** for common commands a
 
 # Example Session
 
-1. `bash(command: "adb devices")` or `bash(command: "flutter emulators")` to find device ID or emulator name. See **[references/emulators.md](references/emulators.md)** for emulator-specific guidance.
-2. `flutter_connect(id: "emulator-5554")`
-3. `flutter_run()` — **ALWAYS use the tool** (not bash tool `flutter run`)
-4. **END YOUR TURN** — `flutter_run()` returns immediately while the app builds in the background and it will notify you when the app is ready or if there's an error. You may use unrelated tools like read() or edit() while waiting, but do NOT use any Maestro, ADB, or Flutter tools until you get the follow-up message that the app is ready.
-5. `flutter_app_status()` — verify connection and check which screen is visible
-6. `flutter_inspect_tree()` — verify semantics labels and screen content
-7.  `maestro_test_file(name: "tap-login", content: "appId: com.example.myapp\n---\n- tapOn: \"login-button\"\n- assertVisible: \"Welcome\"\n")` — define a Maestro test flow.
-8. `bash(command: "flutter test [testfile]")` - Run the Maestro test flow.
-8. Inspect results and make code edits.
-7. `flutter_hot_reload()` / `flutter_hot_restart()` — interact with the app and recover from crashes without restarting the app. See **[references/tv-quirks.md](references/tv-quirks.md)** for Fire TV-specific hot reload gotchas. 
-8. Got to step 5 and repeat the cycle or `flutter_stop()`.
+1.  **Prepare**: `bash(command: "adb devices")` or `flutter emulators` to find a device ID.
+2.  **Connect**: `flutter_connect(id: "<device-id>")`
+3.  **Run**: `flutter_run()` (Fire-and-forget; wait for follow-up message).
+4.  **Inspect**: Once ready, `flutter_app_status()` and `flutter_inspect_tree()`.
+5.  **Test**: 
+    - `maestro_test_file(...)` to create a test file.
+    - `bash(command: "./skills/maestro-flutter-device-testing/scripts/maestro test <path-to-test>")`
+6.  **Debug (if needed)**:
+    - `get_logcat_path()` to find the log file.
+    - `bash(command: 'grep "Error" $(get_logcat_path())')` to analyze logs.
+7.  **Iterate**: `flutter_hot_reload()` or `flutter_hot_restart()` after code edits.
+8.  **Shutdown**: `flutter_stop()` when finished.
 
 ## Inspecting using the VM Service (CLI — raw WebSocket access)
 
